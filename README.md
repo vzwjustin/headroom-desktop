@@ -2,7 +2,7 @@
 
 **Cut your LLM API bills by ~50% without changing how you code.**
 
-> **Pricing:** Headroom has a free tier and paid plans — see [pricing](https://extraheadroom.com/pricing). The desktop shell in this repo is MIT-licensed; account features and paid plans are opt-in.
+> **Open source:** This repo ships without paywalls, subscriptions, or usage gates. All optimization features are free to use.
 
 [![Website](https://img.shields.io/badge/extraheadroom.com-website-blue?style=for-the-badge)](https://extraheadroom.com)&nbsp;&nbsp;[![Download for macOS](https://img.shields.io/github/v/release/gglucass/headroom-desktop?label=Download%20for%20macOS&style=for-the-badge&logo=apple&logoColor=white&color=000000)](https://github.com/gglucass/headroom-desktop/releases/latest)
 
@@ -180,14 +180,11 @@ npm install
 npm run tauri dev
 ```
 
-For the live auth and pricing flow, create a `.env`:
+Optional telemetry and release tooling can be configured via `.env`:
 
 ```bash
-HEADROOM_ACCOUNT_API_BASE_URL="https://extraheadroom.com/api/v1"
 HEADROOM_APTABASE_APP_KEY="REPLACE_WITH_APTABASE_APP_KEY"
 VITE_SENTRY_DSN="REPLACE_WITH_SENTRY_DSN"
-VITE_HEADROOM_SALES_CONTACT_URL="mailto:hello@extraheadroom.com"
-VITE_HEADROOM_CONTACT_FORM_URL="https://extraheadroom.com/contact_request"
 ```
 
 See [`.env.example`](.env.example) for the complete list, including the optional updater and macOS signing keys used for release builds. Set the same keys as GitHub Actions repository variables for production DMG builds.

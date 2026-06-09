@@ -21,9 +21,8 @@ const DEFAULT_ACCOUNT_API_BASE_URL: &str = "http://127.0.0.1:3000/api/v1";
 #[cfg(not(debug_assertions))]
 const DEFAULT_ACCOUNT_API_BASE_URL: &str = "https://extraheadroom.com/api/v1";
 const LOCAL_GRACE_PERIOD_HOURS: i64 = 72;
-// Set to true in dev builds to skip sign-in requirement (indefinite trial)
-#[cfg(debug_assertions)]
-const INDEFINITE_TRIAL: bool = true;
+/// Open-source builds ship without account gating, trials, or usage paywalls.
+const OPEN_SOURCE_FREE: bool = true;
 const AUTH_CODE_EXPIRY_SECONDS: u64 = 900;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -378,6 +377,23 @@ enum RemoteAccountSyncError {
 pub fn get_pricing_status(state: &AppState) -> Result<HeadroomPricingStatus, String> {
     let local_state = reconcile_local_state_with_server(state)?;
     let local_grace_ends_at = local_state.first_seen_at + Duration::hours(LOCAL_GRACE_PERIOD_HOURS);
+    let claude = detect_claude_profile(state);
+    let last_known_good_plan_tier = state.last_known_good_plan_tier();
+
+    if OPEN_SOURCE_FREE {
+        return Ok(evaluate_pricing_status(
+            false,
+            local_state.first_seen_at,
+            local_grace_ends_at,
+            true,
+            None,
+            None,
+            claude,
+            false,
+            last_known_good_plan_tier,
+        ));
+    }
+
     let local_grace_active = Utc::now() < local_grace_ends_at;
     let session_token = read_session_token()?;
     let identity = IdentityPayload::for_state(state);
@@ -397,9 +413,6 @@ pub fn get_pricing_status(state: &AppState) -> Result<HeadroomPricingStatus, Str
                 .unwrap_or(false);
             (false, None, None, launch_discount_active)
         };
-
-    let claude = detect_claude_profile(state);
-    let last_known_good_plan_tier = state.last_known_good_plan_tier();
 
     Ok(evaluate_pricing_status(
         authenticated,
@@ -783,12 +796,30 @@ fn evaluate_pricing_status(
     launch_discount_active: bool,
     last_known_good_plan_tier: Option<ClaudePlanTier>,
 ) -> HeadroomPricingStatus {
-    #[cfg(debug_assertions)]
-    let local_grace_active = if INDEFINITE_TRIAL {
-        true
-    } else {
-        local_grace_active
-    };
+    if OPEN_SOURCE_FREE {
+        return HeadroomPricingStatus {
+            authenticated,
+            local_grace_started_at,
+            local_grace_ends_at,
+            local_grace_active: true,
+            account_sync_error,
+            needs_authentication: false,
+            optimization_allowed: true,
+            should_nudge: false,
+            nudge_level: 0,
+            gate_reason: None,
+            gate_message: "Headroom is fully enabled. This open-source build has no subscription or usage limits."
+                .into(),
+            nudge_threshold_percent: None,
+            effective_nudge_thresholds_percent: None,
+            disable_threshold_percent: None,
+            effective_disable_threshold_percent: None,
+            recommended_subscription_tier: None,
+            claude,
+            account,
+            launch_discount_active: false,
+        };
+    }
     let needs_authentication = !authenticated && !local_grace_active;
     let mut optimization_allowed = true;
     let mut should_nudge = false;
@@ -2098,161 +2129,31 @@ mod tests {
     }
 
     #[test]
-    fn unknown_tier_without_cache_falls_back_to_pro_thresholds() {
-        // No last-known-good cache, no weekly usage signal — fallback applies
-        // Pro thresholds but the user keeps optimization on (no gating yet).
+    fn open_source_build_always_allows_optimization() {
         let (start, end) = grace();
         let status = evaluate_pricing_status(
-            true,
+            false,
             start,
             end,
             false,
             None,
-            Some(expired_account(0.0)),
-            empty_claude_profile(ClaudePlanTier::Unknown),
-            false,
+            None,
+            pro_profile_with_weekly(99.0),
+            true,
             None,
         );
         assert!(status.optimization_allowed);
+        assert!(!status.needs_authentication);
         assert!(!status.should_nudge);
-        // Pro pricing policy is exposed even though classifier returned Unknown.
-        assert_eq!(status.disable_threshold_percent, Some(50.0));
-        assert!(status.gate_message.contains("Pro"));
+        assert!(status.gate_message.contains("open-source"));
     }
 
-    #[test]
-    fn unknown_tier_without_cache_gates_at_pro_disable_threshold() {
-        // Same fallback, but weekly usage is already over Pro's 50% disable
-        // threshold — the user MUST be paused, not given a free pass.
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            unknown_profile_with_weekly(60.0),
-            false,
-            None,
-        );
-        assert!(!status.optimization_allowed);
-        assert!(matches!(
-            status.gate_reason,
-            Some(PricingGateReason::WeeklyUsageLimitReached)
-        ));
-    }
 
-    #[test]
-    fn unknown_tier_with_cached_max5x_uses_max5x_thresholds() {
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            unknown_profile_with_weekly(60.0),
-            false,
-            Some(ClaudePlanTier::Max5x),
-        );
-        assert!(!status.optimization_allowed);
-        assert!(matches!(
-            status.gate_reason,
-            Some(PricingGateReason::WeeklyUsageLimitReached)
-        ));
-        assert!(matches!(
-            status.recommended_subscription_tier,
-            Some(HeadroomSubscriptionTier::Max5x)
-        ));
-    }
 
-    #[test]
-    fn unknown_tier_with_cached_pro_below_threshold_nudges_at_pro_levels() {
-        // Pro nudges at 25% — confirm fallback applies the nudge, not silence.
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            unknown_profile_with_weekly(30.0),
-            false,
-            Some(ClaudePlanTier::Pro),
-        );
-        assert!(status.optimization_allowed);
-        assert!(status.should_nudge);
-        assert_eq!(status.nudge_threshold_percent, Some(25.0));
-    }
 
-    #[test]
-    fn live_pro_classification_ignores_cached_free() {
-        // Cache says Free (a stale prior signal); classifier now says Pro.
-        // Live wins — Pro thresholds apply.
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            pro_profile_with_weekly(50.0),
-            false,
-            Some(ClaudePlanTier::Free),
-        );
-        assert!(!status.optimization_allowed);
-        assert!(matches!(
-            status.gate_reason,
-            Some(PricingGateReason::WeeklyUsageLimitReached)
-        ));
-    }
 
-    #[test]
-    fn unknown_tier_with_cached_free_falls_back_to_pro_not_free() {
-        // Free usage is granted only when the live classifier currently
-        // returns Free. A cached known-good Free is stale and must not
-        // re-open the no-gating path once the live signal goes Unknown.
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            unknown_profile_with_weekly(60.0),
-            false,
-            Some(ClaudePlanTier::Free),
-        );
-        assert!(!status.optimization_allowed);
-        assert!(matches!(
-            status.gate_reason,
-            Some(PricingGateReason::WeeklyUsageLimitReached)
-        ));
-        assert_eq!(status.disable_threshold_percent, Some(50.0));
-        assert!(status.gate_message.contains("Pro"));
-    }
 
-    #[test]
-    fn unknown_tier_gate_message_names_fallback_tier() {
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            empty_claude_profile(ClaudePlanTier::Unknown),
-            false,
-            Some(ClaudePlanTier::Max20x),
-        );
-        assert!(status.gate_message.contains("Max x20"));
-    }
+
 
     #[test]
     fn pro_below_nudge_threshold_stays_silent() {
@@ -2273,145 +2174,12 @@ mod tests {
         assert_eq!(status.nudge_level, 0);
     }
 
-    #[test]
-    fn pro_at_first_nudge_threshold_fires_level_one() {
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            pro_profile_with_weekly(25.0),
-            false,
-            None,
-        );
-        assert!(status.optimization_allowed);
-        assert!(status.should_nudge);
-        assert_eq!(status.nudge_level, 1);
-    }
 
-    #[test]
-    fn pro_at_second_nudge_threshold_fires_level_two() {
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            pro_profile_with_weekly(36.0),
-            false,
-            None,
-        );
-        assert!(status.optimization_allowed);
-        assert_eq!(status.nudge_level, 2);
-    }
 
-    #[test]
-    fn pro_at_third_nudge_threshold_fires_level_three() {
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            pro_profile_with_weekly(46.0),
-            false,
-            None,
-        );
-        assert!(status.optimization_allowed);
-        assert_eq!(status.nudge_level, 3);
-        // Each level uses distinct copy.
-        assert!(status.gate_message.contains("upgrade"));
-    }
 
-    #[test]
-    fn invite_bonus_shifts_nudge_thresholds() {
-        let (start, end) = grace();
-        // Pro nudges = 25/35/45; with +10 bonus -> 35/45/55. Usage 30% should
-        // be silent (below shifted level 1) and disable shifts to 60%.
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(10.0)),
-            pro_profile_with_weekly(30.0),
-            false,
-            None,
-        );
-        assert!(status.optimization_allowed);
-        assert_eq!(status.nudge_level, 0);
-        assert_eq!(
-            status.effective_nudge_thresholds_percent,
-            Some(vec![35.0, 45.0, 55.0])
-        );
-    }
 
-    #[test]
-    fn pro_at_disable_threshold_gates_optimization() {
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(0.0)),
-            pro_profile_with_weekly(50.0),
-            false,
-            None,
-        );
-        assert!(!status.optimization_allowed);
-        assert!(matches!(
-            status.gate_reason,
-            Some(PricingGateReason::WeeklyUsageLimitReached)
-        ));
-    }
 
-    #[test]
-    fn invite_bonus_raises_disable_threshold() {
-        let (start, end) = grace();
-        // Pro disable=50; with +10 bonus -> 60. Usage=55 should not gate.
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(10.0)),
-            pro_profile_with_weekly(55.0),
-            false,
-            None,
-        );
-        assert!(status.optimization_allowed);
-        assert!(status.should_nudge);
-        assert_eq!(status.effective_disable_threshold_percent, Some(60.0));
-    }
 
-    #[test]
-    fn invite_bonus_is_capped_at_50_percentage_points() {
-        let (start, end) = grace();
-        // Even if the backend sent 200, the effective cap is +50 (so 50 + 50 = 100).
-        let status = evaluate_pricing_status(
-            true,
-            start,
-            end,
-            false,
-            None,
-            Some(expired_account(200.0)),
-            pro_profile_with_weekly(0.0),
-            false,
-            None,
-        );
-        assert_eq!(status.effective_disable_threshold_percent, Some(100.0));
-    }
 
     #[test]
     fn missing_weekly_usage_keeps_optimization_on_for_paid_tier() {
@@ -2450,27 +2218,6 @@ mod tests {
     }
 
     #[cfg(not(debug_assertions))]
-    #[test]
-    fn unauthenticated_without_grace_requires_sign_in() {
-        let (start, end) = grace();
-        let status = evaluate_pricing_status(
-            false,
-            start,
-            end,
-            false,
-            None,
-            None,
-            empty_claude_profile(ClaudePlanTier::Pro),
-            false,
-            None,
-        );
-        assert!(status.needs_authentication);
-        assert!(!status.optimization_allowed);
-        assert!(matches!(
-            status.gate_reason,
-            Some(PricingGateReason::SignInRequired)
-        ));
-    }
 
     fn oauth_profile(
         rate_limit_tier: Option<&str>,

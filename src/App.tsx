@@ -13,17 +13,13 @@ import {
   ArrowClockwise,
   Bell,
   Brain,
-  CaretLeft,
   Cpu,
   CurrencyCircleDollar,
   CurrencyDollar,
   Info,
-  EnvelopeSimple,
   GearSix,
   House,
   Heart,
-  Key,
-  SignOut,
   Sliders,
   Sparkle,
   Terminal,
@@ -53,20 +49,7 @@ import {
   maybeFireStaleAppUpdateNotification,
   type AppUpdateStatePatch,
 } from "./lib/appUpdate";
-import { maybeFireTrialNotifications } from "./lib/trialNotifications";
-import {
-  maybeFireUrgentPricingNotifications,
-  maybeFireUrgentRuntimeNotification,
-} from "./lib/urgentNotifications";
-import {
-  describeInvokeError,
-  getNextLowerUpgradePlanId,
-  getUpgradePlans,
-  upgradePlanIntentLabel,
-  type BillingPeriod,
-  type PricingAudience,
-  type UpgradePlanId
-} from "./lib/appHelpers";
+import { maybeFireUrgentRuntimeNotification } from "./lib/urgentNotifications";
 import {
   bootstrapFailureSignature,
   buildBootstrapFailureReport,
@@ -102,24 +85,13 @@ import {
 import {
   buildInitialProxyVerificationRows,
   getClaudeConnector,
-  getContactRequestValidationError,
   getInitialLauncherStage,
   getLauncherAutoConfigureDecision,
-  isValidEmailAddress,
   nextAutoConfigureStep,
   nextAutoConfigureStepAfterApply,
   type LauncherStage
 } from "./lib/launcherHelpers";
 import { mockDashboard } from "./lib/mockData";
-import {
-  cachePricingStatus,
-  type CachedPricing,
-  formatPercentValue,
-  formatRemainingDays,
-  readCachedPricing,
-  subscriptionTierLabel,
-  writeCachedPricing
-} from "./lib/pricing";
 import {
   activityFeedSignature,
   notificationActionView,
@@ -134,9 +106,6 @@ import type {
   AppUpdateConfiguration,
   AvailableAppUpdate,
   BootstrapProgress,
-  ClaudePlanTier,
-  HeadroomAuthCodeRequest,
-  HeadroomPricingStatus,
   ClaudeCodeProject,
   ClientConnectorStatus,
   ClientSetupResult,
@@ -225,18 +194,8 @@ const idleHeadroomLearnPrereqStatus: HeadroomLearnPrereqStatus = {
 const CLAUDE_CODE_INSTALL_DOCS_URL = "https://docs.claude.com/en/docs/claude-code/setup";
 const CLAUDE_CODE_INSTALL_CURL_CMD = "curl -fsSL https://claude.ai/install.sh | bash";
 
-const SALES_CONTACT_URL = (
-  import.meta.env.VITE_HEADROOM_SALES_CONTACT_URL ??
-  ""
-).trim() || "mailto:hello@example.com";
-const CONTACT_FORM_URL = (
-  import.meta.env.VITE_HEADROOM_CONTACT_FORM_URL ??
-  ""
-).trim();
-
 type StartupPhase = "window" | "dashboard" | "bootstrap" | "runtime" | "ready";
 
-const authCodeExpiryFallbackSeconds = 900;
 const APP_UPDATE_BACKGROUND_INITIAL_DELAY_MS = 12_000;
 const APP_UPDATE_BACKGROUND_CHECK_INTERVAL_MS = 60 * 60 * 1000;
 
@@ -601,8 +560,6 @@ export default function App() {
   const [startupCopy, setStartupCopy] = useState("Opening launch window…");
   const [startupReady, setStartupReady] = useState(false);
   const [activeView, setActiveView] = useState<TrayView>("home");
-  const [pricingAudience, setPricingAudience] = useState<PricingAudience>("individual");
-  const [billingPeriod, setBillingPeriod] = useState<BillingPeriod>("annual");
   // Launcher stage is a single source of truth for which onboarding screen
   // is showing. Only one screen can be active at a time; transitions go
   // through `setLauncherStage` so implicit renders from bootstrap/dashboard
@@ -669,24 +626,6 @@ export default function App() {
   // users who stay on Home don't pay its IPC/subprocess cost on every focus.
   const [heavyTabEverOpened, setHeavyTabEverOpened] = useState(false);
   const [activityFeedError, setActivityFeedError] = useState<string | null>(null);
-  const [pricingStatus, setPricingStatus] = useState<HeadroomPricingStatus | null>(null);
-  const [cachedPricing] = useState<CachedPricing>(() => readCachedPricing());
-  const [pricingBusy, setPricingBusy] = useState(false);
-  const [pricingError, setPricingError] = useState<string | null>(null);
-  const pricingRefreshInFlightRef = useRef(false);
-  const [authEmail, setAuthEmail] = useState("");
-  const [authCode, setAuthCode] = useState("");
-  const [authCodeRequestedFor, setAuthCodeRequestedFor] = useState<string | null>(null);
-  const [authCodeExpirySeconds, setAuthCodeExpirySeconds] = useState(authCodeExpiryFallbackSeconds);
-  const [authRequestBusy, setAuthRequestBusy] = useState(false);
-  const [authVerifyBusy, setAuthVerifyBusy] = useState(false);
-  const [authFlowError, setAuthFlowError] = useState<string | null>(null);
-  const [authFlowSuccess, setAuthFlowSuccess] = useState<string | null>(null);
-  const [pendingUpgradePlanId, setPendingUpgradePlanId] = useState<UpgradePlanId | null>(null);
-  const [showAllUpgradePlans, setShowAllUpgradePlans] = useState(false);
-  const [checkoutPollingDeadline, setCheckoutPollingDeadline] = useState<number | null>(null);
-  const desktopActivationSentRef = useRef(false);
-  const autoDisabledByGateRef = useRef(false);
   const [learnInstallCopyNotice, setLearnInstallCopyNotice] = useState<string | null>(null);
 
   const [stepSignature, setStepSignature] = useState("");
@@ -701,12 +640,6 @@ export default function App() {
   const [showUninstallDialog, setShowUninstallDialog] = useState(false);
   const [uninstallBusy, setUninstallBusy] = useState(false);
   const [uninstallError, setUninstallError] = useState<string | null>(null);
-  const [upgradeActionBusy, setUpgradeActionBusy] = useState<UpgradePlanId | null>(null);
-  const [upgradeActionError, setUpgradeActionError] = useState<string | null>(null);
-  const [contactEmail, setContactEmail] = useState("");
-  const [contactSubmitBusy, setContactSubmitBusy] = useState(false);
-  const [contactSubmitError, setContactSubmitError] = useState<string | null>(null);
-  const [contactSubmitSuccess, setContactSubmitSuccess] = useState<string | null>(null);
   const appSemver = appUpdateConfig?.currentVersion ?? packageJson.version;
   const bootstrapFailureSignatureRef = useRef("");
   const mainWindowLastBlurAtRef = useRef<number | null>(null);
@@ -721,23 +654,6 @@ export default function App() {
   const connectorsSignatureRef = useRef(serializeState([] as ClientConnectorStatus[]));
   const runtimeStatusSignatureRef = useRef(serializeState(null as RuntimeStatus | null));
   const claudeProjectsSignatureRef = useRef(serializeState([] as ClaudeCodeProject[]));
-  const upgradePlansState = getUpgradePlans(
-    pricingAudience,
-    pricingStatus?.claude.planTier ?? cachedPricing.planTier,
-    pricingStatus?.recommendedSubscriptionTier ?? cachedPricing.recommendedSubscriptionTier,
-    pricingStatus?.account?.subscriptionTier ?? cachedPricing.subscriptionTier,
-    pricingStatus?.account?.subscriptionActive ?? false,
-    pricingStatus?.launchDiscountActive ?? false,
-    billingPeriod,
-    pricingStatus?.account?.subscriptionAmountCents,
-    pricingStatus?.account?.subscriptionBillingPeriod,
-    pricingStatus?.account?.subscriptionRenewsAt,
-    pricingStatus?.account?.subscriptionStartedAt,
-    pricingStatus?.account?.subscriptionDiscountDuration,
-    pricingStatus?.account?.subscriptionDiscountDurationInMonths
-  );
-  const contactEmailValid = isValidEmailAddress(contactEmail);
-  const authEmailValid = isValidEmailAddress(authEmail);
   const showInstallProgress =
     bootstrapping ||
     bootstrapProgress.running ||
@@ -832,22 +748,6 @@ export default function App() {
       void unlistenPromise.then((unlisten) => unlisten());
     };
   }, []);
-
-  useEffect(() => {
-    setShowAllUpgradePlans(false);
-    if (pricingAudience !== "individual") setBillingPeriod("annual");
-  }, [pricingAudience]);
-
-  useEffect(() => {
-    if (!pricingStatus?.authenticated) {
-      desktopActivationSentRef.current = false;
-    }
-  }, [pricingStatus?.authenticated]);
-
-  useEffect(() => {
-    if (!pricingStatus) return;
-    writeCachedPricing(cachePricingStatus(pricingStatus));
-  }, [pricingStatus]);
 
   useEffect(() => {
     const claudeConnector = getClaudeConnector(connectors);
@@ -945,9 +845,8 @@ export default function App() {
       }
 
       updateStartup("runtime", 80, "Preparing Headroom runtime…");
-      const [runtimeResult, pricingResult] = await Promise.all([
+      const [runtimeResult] = await Promise.all([
         invoke<RuntimeStatus>("get_runtime_status").catch(() => null),
-        invoke<HeadroomPricingStatus>("get_headroom_pricing_status").catch(() => null),
         refreshConnectors(),
       ]);
       if (!active) {
@@ -956,10 +855,6 @@ export default function App() {
       if (runtimeResult) {
         applyRuntimeStatusIfChanged(runtimeResult);
       }
-      if (pricingResult) {
-        setPricingStatus(pricingResult);
-      }
-
       updateStartup(
         "ready",
         95,
@@ -1595,12 +1490,6 @@ export default function App() {
   }, [activeView, selectedClaudeProjectPath, headroomLearnStatus.running, trayWindowFocused]);
 
   useEffect(() => {
-    if (activeView !== "upgrade") {
-      setUpgradeActionError(null);
-    }
-  }, [activeView]);
-
-  useEffect(() => {
     const wasRunning = previousHeadroomLearnRunningRef.current;
     previousHeadroomLearnRunningRef.current = headroomLearnStatus.running;
 
@@ -1685,113 +1574,6 @@ export default function App() {
       return prev; // keep "verifying" or "healthy"
     });
   }, [claudeConnectorEnabled]);
-
-  useEffect(() => {
-    // Pricing status hits the remote Headroom API. When the tray is focused,
-    // poll at 60s so fresh subscription/trial state is visible on demand.
-    // When hidden, slow to 10 min — still fast enough for trial-expiry and
-    // urgent notifications to fire, while cutting hourly API traffic by
-    // ~90%. The launcher window never sets `trayWindowFocused` to false
-    // (its focus listener isn't wired up), so it keeps the 60s cadence.
-    const intervalMs = trayWindowFocused ? 60_000 : 600_000;
-    void refreshPricingStatus();
-    const interval = window.setInterval(() => {
-      void refreshPricingStatus();
-    }, intervalMs);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [trayWindowFocused]);
-
-  // headroom:// deep links from the backend trigger an immediate pricing
-  // refresh — the typical case is Polar's checkout success page redirecting
-  // to headroom://upgraded. Backend has already reconciled the runtime; this
-  // just pulls the new status into UI state without waiting for the next
-  // poll tick.
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    void listen("pricing-refreshed", () => {
-      void refreshPricingStatus();
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
-  }, []);
-
-  // After the user opens a Polar checkout URL, poll pricing status every 5s
-  // for up to 5 minutes so we can flip the UI back to "active" within seconds
-  // of payment confirmation, instead of waiting out the 60s baseline cadence.
-  // Auto-stops once subscription_active is observed or the window expires.
-  useEffect(() => {
-    if (checkoutPollingDeadline === null) return;
-    if (Date.now() > checkoutPollingDeadline) {
-      setCheckoutPollingDeadline(null);
-      return;
-    }
-    const interval = window.setInterval(() => {
-      if (Date.now() > checkoutPollingDeadline) {
-        setCheckoutPollingDeadline(null);
-        return;
-      }
-      void refreshPricingStatus();
-    }, 5_000);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [checkoutPollingDeadline]);
-
-  // Stop the aggressive checkout poll the moment we observe a live
-  // subscription. Saves traffic and stops competing with the 60s cadence.
-  useEffect(() => {
-    if (checkoutPollingDeadline !== null && pricingStatus?.account?.subscriptionActive) {
-      setCheckoutPollingDeadline(null);
-    }
-  }, [checkoutPollingDeadline, pricingStatus?.account?.subscriptionActive]);
-
-  useEffect(() => {
-    const claudeConnector = getClaudeConnector(connectors);
-    if (!pricingStatus || pricingStatus.optimizationAllowed || !claudeConnector?.enabled) {
-      return;
-    }
-    if (connectorsBusy) {
-      return;
-    }
-    autoDisabledByGateRef.current = true;
-    void toggleConnector(claudeConnector, false);
-  }, [connectors, connectorsBusy, pricingStatus]);
-
-  // Companion to the auto-disable effect above: when the pricing gate
-  // releases (e.g., user just signed up post-grace, or weekly usage
-  // rolled over), bring the connector back without forcing a manual
-  // re-enable click. Gated only on our own prior auto-disable so a
-  // user's manual disable during an ungated period is preserved.
-  useEffect(() => {
-    const claudeConnector = getClaudeConnector(connectors);
-    if (!pricingStatus?.optimizationAllowed || !autoDisabledByGateRef.current) {
-      return;
-    }
-    if (!claudeConnector || claudeConnector.enabled || connectorsBusy) {
-      return;
-    }
-    autoDisabledByGateRef.current = false;
-    void toggleConnector(claudeConnector, true);
-  }, [connectors, connectorsBusy, pricingStatus]);
-
-  useEffect(() => {
-    const runtimeHealthyNow =
-      runtimeStatus?.running === true &&
-      runtimeStatus?.proxyReachable === true &&
-      connectorPhase === "healthy";
-    if (!pricingStatus?.authenticated || !runtimeHealthyNow || desktopActivationSentRef.current) {
-      return;
-    }
-    desktopActivationSentRef.current = true;
-    void invoke<HeadroomPricingStatus>("activate_headroom_account")
-      .then((status) => setPricingStatus(status))
-      .catch(() => {
-        desktopActivationSentRef.current = false;
-      });
-  }, [connectorPhase, pricingStatus?.authenticated, runtimeStatus?.proxyReachable, runtimeStatus?.running]);
 
   // While verifying, poll the proxy's /stats request counter and flip to
   // healthy when it ticks past the anchor we captured on the first reachable
@@ -2100,28 +1882,6 @@ export default function App() {
     }
   }
 
-  async function refreshPricingStatus() {
-    if (pricingRefreshInFlightRef.current) {
-      return;
-    }
-    pricingRefreshInFlightRef.current = true;
-    setPricingBusy(true);
-    try {
-      const status = await invoke<HeadroomPricingStatus>("get_headroom_pricing_status");
-      setPricingStatus(status);
-      void maybeFireTrialNotifications(status);
-      void maybeFireUrgentPricingNotifications(status);
-      setPricingError(null);
-    } catch (error) {
-      setPricingError(
-        error instanceof Error ? error.message : "Could not load pricing status."
-      );
-    } finally {
-      pricingRefreshInFlightRef.current = false;
-      setPricingBusy(false);
-    }
-  }
-
   async function refreshClaudeProjects() {
     setClaudeProjectsBusy(true);
     try {
@@ -2284,91 +2044,6 @@ export default function App() {
     await invoke("open_external_link", { url });
   }
 
-  function openUpgradeAuthView(planId: UpgradePlanId | null = null) {
-    setActiveView("upgradeAuth");
-    setPendingUpgradePlanId(planId);
-    setAuthFlowError(null);
-    setAuthFlowSuccess(null);
-  }
-
-  function resetUpgradeAuthStep() {
-    setAuthCode("");
-    setAuthCodeRequestedFor(null);
-    setAuthFlowError(null);
-    setAuthFlowSuccess(null);
-  }
-
-  async function handleRequestAuthCode() {
-    if (!authEmailValid) {
-      setAuthFlowError("Enter a valid email address.");
-      return;
-    }
-    setAuthRequestBusy(true);
-    setAuthFlowError(null);
-    setAuthFlowSuccess(null);
-    try {
-      const result = await invoke<HeadroomAuthCodeRequest>("request_headroom_auth_code", {
-        email: authEmail.trim()
-      });
-      setAuthCodeRequestedFor(result.email);
-      setAuthCodeExpirySeconds(result.expiresInSeconds);
-      setAuthFlowSuccess(`We sent a sign-in code to ${result.email}.`);
-    } catch (error) {
-      setAuthFlowError(describeInvokeError(error, "Could not send sign-in code."));
-    } finally {
-      setAuthRequestBusy(false);
-    }
-  }
-
-  async function handleVerifyAuthCode() {
-    if (!authEmailValid) {
-      setAuthFlowError("Enter a valid email address.");
-      return;
-    }
-    if (!authCode.trim()) {
-      setAuthFlowError("Enter the authentication code from your email.");
-      return;
-    }
-    setAuthVerifyBusy(true);
-    setAuthFlowError(null);
-    setAuthFlowSuccess(null);
-    try {
-      const status = await invoke<HeadroomPricingStatus>("verify_headroom_auth_code", {
-        email: authEmail.trim(),
-        code: authCode.trim(),
-        inviteCode: null
-      });
-      setPricingStatus(status);
-      setAuthCode("");
-      setAuthCodeRequestedFor(null);
-      setAuthFlowSuccess("Headroom account connected.");
-      setPendingUpgradePlanId(null);
-      setActiveView("upgrade");
-      await refreshConnectors();
-    } catch (error) {
-      setAuthFlowError(describeInvokeError(error, "Could not verify sign-in code."));
-    } finally {
-      setAuthVerifyBusy(false);
-    }
-  }
-
-  async function handleSignOutHeadroomAccount() {
-    setAuthFlowError(null);
-    setAuthFlowSuccess(null);
-    try {
-      await invoke("sign_out_headroom_account");
-      setPricingStatus(await invoke<HeadroomPricingStatus>("get_headroom_pricing_status"));
-      setAuthCode("");
-      setAuthCodeRequestedFor(null);
-      setAuthFlowSuccess("Signed out of Headroom.");
-      setPendingUpgradePlanId(null);
-    } catch (error) {
-      setAuthFlowError(
-        error instanceof Error ? error.message : "Could not sign out of Headroom."
-      );
-    }
-  }
-
   async function openLearnInstallDocsLink() {
     try {
       await openExternalLink(CLAUDE_CODE_INSTALL_DOCS_URL);
@@ -2377,155 +2052,6 @@ export default function App() {
         error instanceof Error ? error.message : "Could not open the install guide."
       );
       window.setTimeout(() => setLearnInstallCopyNotice(null), 3000);
-    }
-  }
-
-  async function handleUpgradeAction(planId: UpgradePlanId) {
-    const activeHeadroomPlanId =
-      pricingStatus?.account?.subscriptionActive
-        ? pricingStatus.account.subscriptionTier ?? null
-        : null;
-    const action = (() => {
-      switch (planId) {
-        case "free":
-          return {
-            kind: activeHeadroomPlanId ? "billing_portal" as const : "internal" as const
-          };
-        case "pro":
-          return {
-            kind: activeHeadroomPlanId === planId ? "internal" as const : "checkout" as const
-          };
-        case "max5x":
-          return {
-            kind: activeHeadroomPlanId === planId ? "internal" as const : "checkout" as const
-          };
-        case "max20x":
-          return {
-            kind: activeHeadroomPlanId === planId ? "internal" as const : "checkout" as const
-          };
-        case "team":
-          return {
-            kind: "external" as const,
-            url: SALES_CONTACT_URL,
-            missing: "Set VITE_HEADROOM_SALES_CONTACT_URL to enable Team sales inquiries."
-          };
-        case "enterprise":
-          return {
-            kind: "external" as const,
-            url: SALES_CONTACT_URL,
-            missing: "Set VITE_HEADROOM_SALES_CONTACT_URL to enable Enterprise contact."
-          };
-        default:
-          return null;
-      }
-    })();
-
-    if (!action) {
-      return;
-    }
-
-    trackAnalyticsEvent("upgrade_button_clicked", {
-      plan_id: planId,
-      action_kind: action.kind,
-      email: pricingStatus?.account?.email ?? pricingStatus?.claude?.email ?? undefined,
-    });
-
-    if (action.kind === "internal") {
-      setUpgradeActionError(null);
-      setActiveView("home");
-      return;
-    }
-
-    if (!pricingStatus?.authenticated) {
-      openUpgradeAuthView(planId);
-      return;
-    }
-
-    if (action.kind === "checkout") {
-      setUpgradeActionBusy(planId);
-      setUpgradeActionError(null);
-
-      try {
-        const url = await invoke<string>("create_headroom_checkout_session", {
-          subscriptionTier: planId,
-          billingPeriod
-        });
-        await openExternalLink(url);
-        // Aggressive poll for the next 5 minutes so the moment Polar marks
-        // the subscription active we surface "Headroom is back online" without
-        // making the user wait out the normal 60s pricing-refresh cadence.
-        setCheckoutPollingDeadline(Date.now() + 5 * 60_000);
-      } catch (error) {
-        setUpgradeActionError(
-          error instanceof Error ? error.message : typeof error === "string" ? error : "Could not start checkout."
-        );
-      } finally {
-        setUpgradeActionBusy(null);
-      }
-      return;
-    }
-
-    if (action.kind === "billing_portal") {
-      setUpgradeActionBusy(planId);
-      setUpgradeActionError(null);
-
-      try {
-        const url = await invoke<string>("get_headroom_billing_portal_url");
-        await openExternalLink(url);
-      } catch (error) {
-        setUpgradeActionError(
-          error instanceof Error ? error.message : typeof error === "string" ? error : "Could not open billing portal."
-        );
-      } finally {
-        setUpgradeActionBusy(null);
-      }
-      return;
-    }
-
-    if (!action.url) {
-      setUpgradeActionError(action.missing ?? "Could not open the selected plan link.");
-      return;
-    }
-
-    setUpgradeActionBusy(planId);
-    setUpgradeActionError(null);
-
-    try {
-      await openExternalLink(action.url);
-    } catch (error) {
-      setUpgradeActionError(
-        error instanceof Error ? error.message : "Could not open the selected plan link."
-      );
-    } finally {
-      setUpgradeActionBusy(null);
-    }
-  }
-
-  async function handleContactSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-
-    const validationError = getContactRequestValidationError(CONTACT_FORM_URL, contactEmail);
-    if (validationError) {
-      setContactSubmitError(validationError);
-      setContactSubmitSuccess(null);
-      return;
-    }
-
-    const trimmed = contactEmail.trim();
-    setContactSubmitBusy(true);
-    setContactSubmitError(null);
-    setContactSubmitSuccess(null);
-
-    try {
-      await invoke("submit_contact_request", { url: CONTACT_FORM_URL, email: trimmed });
-      setContactEmail("");
-      setContactSubmitSuccess("Thanks. Check your inbox for a confirmation email.");
-    } catch (error) {
-      setContactSubmitError(
-        error instanceof Error ? error.message : "Could not submit the contact request."
-      );
-    } finally {
-      setContactSubmitBusy(false);
     }
   }
 
@@ -3439,27 +2965,6 @@ export default function App() {
       } as const;
     }
 
-    if (pricingStatus?.needsAuthentication) {
-      return {
-        tone: "degraded",
-        title: pricingStatus.gateMessage
-      } as const;
-    }
-
-    if (pricingStatus && !pricingStatus.optimizationAllowed) {
-      return {
-        tone: "disabled",
-        title: pricingStatus.gateMessage
-      } as const;
-    }
-
-    if (pricingStatus?.shouldNudge) {
-      return {
-        tone: "starting",
-        title: pricingStatus.gateMessage
-      } as const;
-    }
-
     if (runtimeHealthy) {
       if (connectorPhase === "disabled") {
         return {
@@ -3526,251 +3031,6 @@ export default function App() {
     return [...topProjects, pinnedClaudeProject];
   })();
   const hiddenClaudeProjectsCount = sortedClaudeProjects.length - visibleClaudeProjects.length;
-  const trialDaysRemaining = formatRemainingDays(pricingStatus?.account?.trialEndsAt);
-  const localGraceHoursRemaining = (() => {
-    const target = pricingStatus?.localGraceEndsAt
-      ? new Date(pricingStatus.localGraceEndsAt).getTime()
-      : Number.NaN;
-    if (Number.isNaN(target)) {
-      return null;
-    }
-    return Math.max(0, Math.ceil((target - Date.now()) / 3_600_000));
-  })();
-  const weeklyLimitPercentLabel = formatPercentValue(
-    pricingStatus?.effectiveDisableThresholdPercent ?? pricingStatus?.disableThresholdPercent
-  );
-  const upgradeDefaultPlanId =
-    pricingAudience === "individual"
-      ? (pricingStatus?.recommendedSubscriptionTier ?? cachedPricing.recommendedSubscriptionTier ?? upgradePlansState.featuredPlanId)
-      : "enterprise";
-  const upgradeDefaultPlan = upgradePlansState.plans.find((plan) => plan.id === upgradeDefaultPlanId) ?? null;
-  const activeHeadroomPlanId =
-    pricingAudience === "individual" && pricingStatus?.account?.subscriptionActive
-      ? pricingStatus.account.subscriptionTier ?? null
-      : null;
-  const downgradePlanId = getNextLowerUpgradePlanId(activeHeadroomPlanId);
-  const visibleUpgradePlans = (() => {
-    if (showAllUpgradePlans || upgradePlansState.plans.length <= 2) {
-      return upgradePlansState.plans;
-    }
-
-    if (pricingAudience === "individual" && activeHeadroomPlanId && downgradePlanId) {
-      const visiblePlanIds = new Set<UpgradePlanId>([activeHeadroomPlanId, downgradePlanId]);
-      const activeWindowPlans = upgradePlansState.plans.filter((plan) => visiblePlanIds.has(plan.id));
-      if (activeWindowPlans.length === 2) {
-        return activeWindowPlans;
-      }
-    }
-
-    return upgradePlansState.plans.slice(0, 2);
-  })();
-  const hasHiddenUpgradePlans = visibleUpgradePlans.length < upgradePlansState.plans.length;
-  const pendingUpgradePlanLabel = upgradePlanIntentLabel(pendingUpgradePlanId);
-  const upgradeAuthMessage = pendingUpgradePlanLabel
-    ? `Sign in with email to upgrade to the ${pendingUpgradePlanLabel} plan`
-    : "Sign in with email to unlock your 14-day Headroom trial";
-  const accountDisplayEmail = (() => {
-    const enteredEmail = authEmail.trim();
-    return (
-      pricingStatus?.account?.email ??
-      (enteredEmail || pricingStatus?.claude.email || "unknown email")
-    );
-  })();
-  const accountPlanName = (() => {
-    if (!pricingStatus?.authenticated) {
-      return null;
-    }
-    if (!pricingStatus.account) {
-      return pricingStatus.accountSyncError ? "Plan unavailable" : "Syncing plan...";
-    }
-    if (pricingStatus.account.subscriptionActive) {
-      return subscriptionTierLabel(pricingStatus.account.subscriptionTier);
-    }
-    if (pricingStatus.account.trialActive) {
-      if (trialDaysRemaining != null) {
-        return `${trialDaysRemaining} day${trialDaysRemaining === 1 ? "" : "s"} left in trial`;
-      }
-      return "14-day trial";
-    }
-    return "Trial expired";
-  })();
-  const upgradeTrialCallout = (() => {
-    if (pricingBusy && !pricingStatus) {
-      return {
-        tone: "neutral" as const,
-        message: "Loading your Headroom access..."
-      };
-    }
-    if (!pricingStatus) {
-      return {
-        tone: "neutral" as const,
-        message: "Headroom pricing status is unavailable right now."
-      };
-    }
-    if (!pricingStatus.authenticated) {
-      if (!pricingStatus.localGraceActive) {
-        return {
-          tone: "expired" as const,
-          message: "Your 72-hour Headroom access expired. Create an account to extend to 14 days.",
-          actionLabel: "Sign up",
-          onAction: openUpgradeAuthView
-        };
-      }
-      const hoursLabel =
-        localGraceHoursRemaining != null
-          ? `${localGraceHoursRemaining} hour${localGraceHoursRemaining === 1 ? "" : "s"}`
-          : "72 hours";
-      return {
-        tone: "warning" as const,
-        message: `${hoursLabel} left in your 72-hour trial. Create an account to extend trial to 14 days.`,
-        actionLabel: "Sign up",
-        onAction: openUpgradeAuthView
-      };
-    }
-    if (!pricingStatus.account) {
-      return {
-        tone: "neutral" as const,
-        message:
-          pricingStatus.accountSyncError ??
-          "Headroom account connected. Syncing your trial and plan details..."
-      };
-    }
-    if (pricingStatus.account?.subscriptionActive) {
-      return {
-        tone: "healthy" as const,
-        message: `${subscriptionTierLabel(pricingStatus.account.subscriptionTier)} is active. Headroom can keep optimizing without limits.`
-      };
-    }
-    if (pricingStatus.account?.trialActive) {
-      const daysLabel =
-        trialDaysRemaining != null
-          ? `${trialDaysRemaining} day${trialDaysRemaining === 1 ? "" : "s"}`
-          : "14 days";
-      return {
-        tone: "warning" as const,
-        message: `${daysLabel} of trial to go. Upgrade to continue using Headroom without limits.`,
-        actionLabel: "Upgrade",
-        onAction: () => void handleUpgradeAction(upgradeDefaultPlanId)
-      };
-    }
-    return {
-      tone: pricingStatus.optimizationAllowed ? "warning" as const : "expired" as const,
-      message: `Trial expired. You can only use Headroom for ${weeklyLimitPercentLabel} of your weekly Claude Code limits. To continue using Headroom without limits.`,
-      actionLabel: "Upgrade",
-      onAction: () => void handleUpgradeAction(upgradeDefaultPlanId)
-    };
-  })();
-  const pricingAuthCard = (
-    <section className="pricing-auth-card pricing-auth-card--standalone">
-      <div className="pricing-auth-card__header">
-        <div>
-          <h2>{upgradeAuthMessage}.</h2>
-        </div>
-      </div>
-      {!authCodeRequestedFor ? (
-        <>
-          <div className="pricing-auth-card__grid pricing-auth-card__grid--single">
-            <label className="pricing-auth-field">
-              <span>Email</span>
-              <div className="pricing-auth-field__input">
-                <EnvelopeSimple size={16} weight="bold" />
-                <input
-                  onChange={(event) => {
-                    setAuthEmail(event.target.value);
-                    setAuthFlowError(null);
-                  }}
-                  placeholder="you@example.com"
-                  type="email"
-                  value={authEmail}
-                />
-              </div>
-            </label>
-          </div>
-          <div className="pricing-auth-card__actions">
-            <button
-              className="primary-button"
-              disabled={!authEmailValid || authRequestBusy}
-              onClick={() => void handleRequestAuthCode()}
-              type="button"
-            >
-              {authRequestBusy ? "Sending..." : "Sign in"}
-            </button>
-          </div>
-          <p className="pricing-auth-card__legal">
-            {"By signing in, you agree to our "}
-            <button className="link-button" onClick={() => void invoke("open_external_link", { url: "https://extraheadroom.com/terms" })} type="button">Terms of Service</button>
-            {" and "}
-            <button className="link-button" onClick={() => void invoke("open_external_link", { url: "https://extraheadroom.com/privacy" })} type="button">Privacy Policy</button>
-            {"."}
-          </p>
-        </>
-      ) : (
-        <>
-          <div className="pricing-auth-card__code-step">
-            <p className="pricing-auth-card__step-copy">
-              Enter the authentication code we sent to <strong>{authCodeRequestedFor}</strong>.
-            </p>
-            <button
-              className="link-button pricing-auth-card__change-email"
-              onClick={resetUpgradeAuthStep}
-              type="button"
-            >
-              Use a different email
-            </button>
-          </div>
-          <div className="pricing-auth-card__grid pricing-auth-card__grid--single">
-            <label className="pricing-auth-field">
-              <span>Authentication code</span>
-              <div className="pricing-auth-field__input">
-                <Key size={16} weight="bold" />
-                <input
-                  onChange={(event) => {
-                    setAuthCode(event.target.value);
-                    setAuthFlowError(null);
-                  }}
-                  placeholder={`Enter the code sent to ${authCodeRequestedFor}`}
-                  type="text"
-                  value={authCode}
-                />
-              </div>
-            </label>
-          </div>
-          <div className="pricing-auth-card__actions">
-            <button
-              className="primary-button"
-              disabled={!authCode.trim() || authVerifyBusy}
-              onClick={() => void handleVerifyAuthCode()}
-              type="button"
-            >
-              {authVerifyBusy ? "Verifying..." : "Verify and continue"}
-            </button>
-            <p className="pricing-auth-card__resend">
-              Didn't receive a code?{" "}
-              <button
-                className="link-button"
-                disabled={authRequestBusy}
-                onClick={() => void handleRequestAuthCode()}
-                type="button"
-              >
-                {authRequestBusy ? "Sending..." : "Resend code"}
-              </button>
-            </p>
-          </div>
-        </>
-      )}
-      {authFlowError ? (
-        <p className="install-progress__error">{authFlowError}</p>
-      ) : null}
-      {authFlowSuccess ? (
-        <p className="upgrade-plan-card__contact-status upgrade-plan-card__contact-status--success">
-          {authFlowSuccess}
-        </p>
-      ) : null}
-      {pricingError ? (
-        <p className="install-progress__error">{pricingError}</p>
-      ) : null}
-    </section>
-  );
 
   return (
     <main className="tray-shell">
@@ -3797,13 +3057,6 @@ export default function App() {
           ))}
         </nav>
         <div className="tray-sidebar__footer">
-          <button
-            className={`upgrade-pill${activeView === "upgrade" || activeView === "upgradeAuth" ? " is-active" : ""}`}
-            onMouseDown={() => setActiveView("upgrade")}
-            type="button"
-          >
-            Upgrade
-          </button>
           <button
             className={`tray-nav__item${activeView === "settings" ? " is-active" : ""}`}
             onMouseDown={() => setActiveView("settings")}
@@ -4115,275 +3368,8 @@ export default function App() {
           />
         </div>
 
-        <div className="tray-content tray-content--upgrade" hidden={activeView !== "upgrade"}>
-          <section className="upgrade-hero">
-            <h1>Plans based on your Claude subscription</h1>
-            <div className="upgrade-toggle" aria-label="Upgrade audiences" role="tablist">
-              {[
-                { id: "individual" as const, label: "Individual" },
-                { id: "teamEnterprise" as const, label: "Team & Enterprise" }
-              ].map((audience) => (
-                <button
-                  key={audience.id}
-                  aria-selected={pricingAudience === audience.id}
-                  className={`upgrade-toggle__item${pricingAudience === audience.id ? " is-active" : ""}`}
-                  onClick={() => {
-                    setPricingAudience(audience.id);
-                    setUpgradeActionError(null);
-                  }}
-                  role="tab"
-                  type="button"
-                >
-                  {audience.label}
-                </button>
-              ))}
-            </div>
-            {pricingAudience === "individual" ? (
-              <div className="upgrade-billing-toggle" role="group" aria-label="Billing period">
-                {(["annual", "monthly"] as const).map((period) => (
-                  <button
-                    key={period}
-                    className={`upgrade-billing-toggle__item${billingPeriod === period ? " is-active" : ""}`}
-                    onClick={() => setBillingPeriod(period)}
-                    type="button"
-                  >
-                    {period === "annual" ? (
-                      <>Annual <span className="upgrade-billing-toggle__save">Save 33%</span></>
-                    ) : "Monthly"}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </section>
-
-          {!activeHeadroomPlanId ? (
-            <>
-              <section
-                className={`upgrade-trial-callout upgrade-trial-callout--${upgradeTrialCallout.tone}`}
-              >
-                <div className="upgrade-trial-callout__content">
-                  <p className="upgrade-trial-callout__message">
-                    {upgradeTrialCallout.message}
-                  </p>
-                </div>
-                {upgradeTrialCallout.actionLabel && upgradeTrialCallout.onAction ? (
-                  <button
-                    className="primary-button upgrade-trial-callout__button"
-                    disabled={authRequestBusy || authVerifyBusy || upgradeActionBusy !== null}
-                    onClick={() => upgradeTrialCallout.onAction?.()}
-                    type="button"
-                  >
-                    {upgradeTrialCallout.actionLabel}
-                  </button>
-                ) : null}
-              </section>
-
-              {pricingStatus?.launchDiscountActive ? (
-                <section className="upgrade-trial-callout upgrade-sale-banner">
-                  <p className="upgrade-trial-callout__message">🎉 50% off all paid plans — launch promotion</p>
-                </section>
-              ) : null}
-            </>
-          ) : null}
-
-          <section
-            className={`upgrade-plan-grid${visibleUpgradePlans.length === 1 ? " upgrade-plan-grid--single" : ""}`}
-          >
-            {visibleUpgradePlans.map((plan) => {
-              const isFeatured = plan.id === upgradePlansState.featuredPlanId;
-              const downgradeButtonClassName =
-                plan.ctaTone === "downgrade" ? " upgrade-plan-card__button--downgrade" : "";
-              const buttonClassName =
-                plan.id === "free"
-                  ? `primary-button upgrade-plan-card__button upgrade-plan-card__button--free${downgradeButtonClassName}`
-                  : plan.ctaVariant === "primary"
-                  ? `primary-button upgrade-plan-card__button${downgradeButtonClassName}`
-                  : `secondary-button upgrade-plan-card__button${downgradeButtonClassName}`;
-
-              const isActivePlan = plan.id === activeHeadroomPlanId;
-              return (
-                <article
-                  className={`upgrade-plan-card${isFeatured ? " upgrade-plan-card--featured" : ""}${isActivePlan ? " upgrade-plan-card--active" : ""}`}
-                  key={plan.id}
-                >
-                  <div className="upgrade-plan-card__top">
-                    <div className="upgrade-plan-card__title-block">
-                      <span className="upgrade-plan-card__icon" aria-hidden="true">
-                        <Sparkle weight={isFeatured ? "fill" : "duotone"} />
-                      </span>
-                      <div>
-                        <h2>
-                          {plan.name}
-                          {isActivePlan ? (
-                            <span className="upgrade-plan-card__active-badge">Active</span>
-                          ) : null}
-                        </h2>
-                        <p>{plan.tagline}</p>
-                      </div>
-                    </div>
-                    {plan.centeredPriceLabel ? (
-                      <div className="upgrade-plan-card__price-note">{plan.centeredPriceLabel}</div>
-                    ) : (
-                      <div className="upgrade-plan-card__price-block">
-                        <div>
-                          {plan.originalPrice && !activeHeadroomPlanId ? (
-                            <div className="upgrade-plan-card__sale-row">
-                              <s className="upgrade-plan-card__original-price">{plan.originalPrice}</s>
-                              <span className="upgrade-plan-card__sale-badge">50% off</span>
-                            </div>
-                          ) : null}
-                          <strong>{plan.price}</strong>
-                        </div>
-                        <span>
-                          {plan.billingLines[0]}
-                          <br />
-                          {plan.billingLines[1]}
-                        </span>
-                      </div>
-                    )}
-                    {isActivePlan && plan.purchaseInfo ? (
-                      <p className="upgrade-plan-card__purchase-info">
-                        {plan.purchaseInfo.discountPct > 0
-                          ? `Renews ${plan.purchaseInfo.paidPerMonthLabel}/mo on ${plan.purchaseInfo.renewsOn} (${plan.purchaseInfo.discountPct}% off)`
-                          : `Renews ${plan.price}/mo on ${plan.purchaseInfo.renewsOn}`}
-                      </p>
-                    ) : null}
-                  </div>
-                  <div className="upgrade-plan-card__action">
-                    {plan.id === "enterprise" ? (
-                      <form className="upgrade-plan-card__contact-form" onSubmit={(event) => void handleContactSubmit(event)}>
-                        <input
-                          className="upgrade-plan-card__contact-input"
-                          onChange={(event) => {
-                            setContactEmail(event.target.value);
-                            if (contactSubmitError) {
-                              setContactSubmitError(null);
-                            }
-                            if (contactSubmitSuccess) {
-                              setContactSubmitSuccess(null);
-                            }
-                          }}
-                          placeholder="you@company.com"
-                          type="email"
-                          value={contactEmail}
-                        />
-                        <button
-                          className={`secondary-button upgrade-plan-card__button upgrade-plan-card__contact-submit${contactEmailValid ? " is-ready" : ""}`}
-                          disabled={!contactEmailValid || contactSubmitBusy}
-                          type="submit"
-                        >
-                          {contactSubmitBusy ? "Sending..." : plan.ctaLabel}
-                        </button>
-                      </form>
-                    ) : (
-                      <button
-                        className={buttonClassName}
-                        disabled={plan.disabled || upgradeActionBusy === plan.id}
-                        onClick={() => void handleUpgradeAction(plan.id)}
-                        type="button"
-                      >
-                        {upgradeActionBusy === plan.id ? "Opening..." : plan.ctaLabel}
-                      </button>
-                    )}
-                  </div>
-
-                  {plan.features.length > 0 ? (
-                    <div className="upgrade-plan-card__features">
-                      <ul>
-                        {plan.features.map((feature) => (
-                          <li key={feature}>{feature}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  ) : null}
-                  {plan.id === "enterprise" && contactSubmitError ? (
-                    <p className="upgrade-plan-card__contact-status upgrade-plan-card__contact-status--error">
-                      {contactSubmitError}
-                    </p>
-                  ) : null}
-                  {plan.id === "enterprise" && contactSubmitSuccess ? (
-                    <p className="upgrade-plan-card__contact-status upgrade-plan-card__contact-status--success">
-                      {contactSubmitSuccess}
-                    </p>
-                  ) : null}
-                </article>
-              );
-            })}
-          </section>
-          {pricingAudience === "individual" && (hasHiddenUpgradePlans || showAllUpgradePlans) ? (
-            <button
-              className="upgrade-plan-grid__toggle"
-              onClick={() => setShowAllUpgradePlans((current) => !current)}
-              type="button"
-            >
-              {showAllUpgradePlans ? "show fewer plans" : "show more plans"}
-            </button>
-          ) : null}
-
-          {upgradeActionError ? (
-            <p className="install-progress__error">{upgradeActionError}</p>
-          ) : null}
-        </div>
-
-        <div className="tray-content tray-content--upgrade" hidden={activeView !== "upgradeAuth"}>
-          <section className="upgrade-auth-view">
-            <div className="upgrade-auth-view__header">
-              <div className="upgrade-auth-view__title-row">
-                <button
-                  aria-label="Back to upgrade plans"
-                  className="upgrade-auth-view__back"
-                  onClick={() => setActiveView("upgrade")}
-                  type="button"
-                >
-                  <CaretLeft size={16} weight="bold" />
-                </button>
-                <h1>Create account</h1>
-              </div>
-            </div>
-            {pricingAuthCard}
-          </section>
-        </div>
-
         <div className="tray-content" hidden={activeView !== "settings"}>
             <section className="panel-stack">
-              <article className="soft-card panel-card settings-account-card">
-                <div className="settings-account-row">
-                  <p className="settings-account-copy">
-                    Headroom account:{" "}
-                    {pricingStatus?.authenticated ? (
-                      <>
-                        {accountDisplayEmail} <em>({accountPlanName})</em>
-                      </>
-                    ) : (
-                      <em>not signed in</em>
-                    )}
-                  </p>
-                  {pricingStatus?.authenticated ? (
-                    <button
-                      className="secondary-button secondary-button--small"
-                      onClick={() => void handleSignOutHeadroomAccount()}
-                      type="button"
-                    >
-                      <SignOut size={16} weight="bold" />
-                      Sign out
-                    </button>
-                  ) : (
-                    <button
-                      className="secondary-button secondary-button--small"
-                      onClick={() => openUpgradeAuthView()}
-                      type="button"
-                    >
-                      Sign in
-                    </button>
-                  )}
-                </div>
-                {pricingStatus?.claude?.profileFetchError ? (
-                  <p className="settings-account-notice">
-                    {pricingStatus.claude.profileFetchError}
-                  </p>
-                ) : null}
-              </article>
-
               <article className="soft-card panel-card">
                 <div className="panel-card__header">
                   <div />
