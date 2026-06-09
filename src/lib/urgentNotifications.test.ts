@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { HeadroomPricingStatus, RuntimeStatus } from "./types";
-import {
-  maybeFireUrgentPricingNotifications,
-  maybeFireUrgentRuntimeNotification,
-} from "./urgentNotifications";
+import type { RuntimeStatus } from "./types";
+import { maybeFireUrgentRuntimeNotification } from "./urgentNotifications";
 
 const { invokeMock, isVisibleMock } = vi.hoisted(() => ({
   invokeMock: vi.fn(),
@@ -33,39 +30,6 @@ function installStorage(initial: Record<string, string> = {}) {
   return values;
 }
 
-function makePricing(
-  overrides: Partial<HeadroomPricingStatus> = {}
-): HeadroomPricingStatus {
-  return {
-    authenticated: true,
-    localGraceStartedAt: new Date().toISOString(),
-    localGraceEndsAt: new Date().toISOString(),
-    localGraceActive: false,
-    accountSyncError: null,
-    needsAuthentication: false,
-    optimizationAllowed: true,
-    shouldNudge: false,
-    nudgeLevel: 0,
-    gateReason: null,
-    gateMessage: "",
-    nudgeThresholdPercent: null,
-    effectiveNudgeThresholdsPercent: null,
-    disableThresholdPercent: null,
-    effectiveDisableThresholdPercent: null,
-    recommendedSubscriptionTier: null,
-    claude: {
-      authMethod: "claude_ai_oauth",
-      email: null,
-      displayName: null,
-      planTier: "free",
-      hasExtraUsageEnabled: false,
-    },
-    account: null,
-    launchDiscountActive: false,
-    ...overrides,
-  };
-}
-
 function makeRuntime(overrides: Partial<RuntimeStatus> = {}): RuntimeStatus {
   return {
     platform: "darwin",
@@ -84,15 +48,6 @@ function makeRuntime(overrides: Partial<RuntimeStatus> = {}): RuntimeStatus {
     ...overrides,
   };
 }
-
-describe("maybeFireUrgentPricingNotifications", () => {
-  it("is a no-op in open-source builds", async () => {
-    await expect(
-      maybeFireUrgentPricingNotifications({} as HeadroomPricingStatus)
-    ).resolves.toBeUndefined();
-    expect(invokeMock).not.toHaveBeenCalled();
-  });
-});
 
 describe("maybeFireUrgentRuntimeNotification", () => {
   afterEach(() => {

@@ -1,15 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
-import type { HeadroomPricingStatus, RuntimeStatus } from "./types";
+import type { RuntimeStatus } from "./types";
 
 const RUNTIME_DOWN_KEY = "headroom_urgent_runtime_down_date";
-
-export async function maybeFireUrgentPricingNotifications(
-  _status: HeadroomPricingStatus
-): Promise<void> {
-  // Open-source builds have no pricing gate notifications.
-}
 
 export async function maybeFireUrgentRuntimeNotification(
   runtime: RuntimeStatus
