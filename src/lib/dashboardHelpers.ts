@@ -311,7 +311,9 @@ export function formatLearnStatus(project: {
   return `last scan: ${diffDays} days ago`;
 }
 
-const SUPPORTED_CLIENT_CONNECTOR_IDS = new Set(["claude_code", "codex_cli"]);
+export const MANAGED_CONNECTOR_IDS = ["claude_code", "codex_cli"] as const;
+
+const SUPPORTED_CLIENT_CONNECTOR_IDS = new Set<string>(MANAGED_CONNECTOR_IDS);
 
 export function aggregateClientConnectors(connectors: ClientConnectorStatus[]) {
   return connectors.filter((connector) =>

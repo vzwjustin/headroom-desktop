@@ -36,6 +36,14 @@ export const mockDashboard: DashboardState = {
       configured: false,
       health: "attention",
       notes: ["Detected on this machine", "Needs proxy configuration"]
+    },
+    {
+      id: "codex_cli",
+      name: "Codex",
+      installed: false,
+      configured: false,
+      health: "not_detected",
+      notes: ["Not detected on this machine yet."]
     }
   ],
   recentUsage: [],

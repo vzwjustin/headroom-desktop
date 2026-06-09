@@ -87,9 +87,11 @@ import {
   getClaudeConnector,
   getCodexConnector,
   getConnectorsNeedingSetup,
+  getDisabledManagedConnectors,
   getInitialLauncherStage,
   getLauncherAutoConfigureDecision,
   isAnyManagedConnectorEnabled,
+  isManagedConnectorId,
   nextAutoConfigureStep,
   nextAutoConfigureStepAfterApply,
   type LauncherStage
@@ -1767,11 +1769,7 @@ export default function App() {
   }
 
   function canConfigureConnectorWithoutDetection(connector: ClientConnectorStatus) {
-    return (
-      connector.installed ||
-      connector.clientId === "claude_code" ||
-      connector.clientId === "codex_cli"
-    );
+    return connector.installed || isManagedConnectorId(connector.clientId);
   }
 
   function getConnectorSupportWarning(connector: ClientConnectorStatus) {
@@ -1782,7 +1780,7 @@ export default function App() {
     if (connector.installed) {
       return null;
     }
-    if (connector.clientId === "claude_code" || connector.clientId === "codex_cli") {
+    if (isManagedConnectorId(connector.clientId)) {
       return connectorUnavailableReasons[connector.clientId];
     }
     return null;
@@ -2486,7 +2484,7 @@ export default function App() {
         showSpinner={bootstrapping}
       >
         <h1>
-          Headroom cuts Claude Code costs
+          Headroom cuts coding client costs
           <br />
            ~<span className="headline-highlight">50%</span> by trimming prompt bloat.
         </h1>
@@ -2507,7 +2505,7 @@ export default function App() {
           <article>
             <strong>Less tokens, no impact</strong>
             <p>
-              Smart optimization cuts noise before Claude Code sees it, with
+              Smart optimization cuts noise before your clients see it, with
               no impact on the output.
             </p>
           </article>
@@ -2569,6 +2567,11 @@ export default function App() {
                     Add a PreToolUse hook to <code>~/.claude/settings.json</code> and a script at{" "}
                     <code>~/.claude/hooks/headroom-rtk-rewrite.sh</code> so Claude Code runs through
                     Headroom. A timestamped backup is written before any edit.
+                  </li>
+                  <li>
+                    Point Codex at <code>http://127.0.0.1:6767/v1</code> by setting{" "}
+                    <code>openai_base_url</code> in <code>~/.codex/config.toml</code> and exporting{" "}
+                    <code>OPENAI_BASE_URL</code> in your shell profiles when you enable Codex.
                   </li>
                 </ul>
               </div>
@@ -2967,7 +2970,7 @@ export default function App() {
   const platformPreviewNotice =
     runtimeStatus?.supportTier === "experimental"
       ? runtimeStatus.platform === "linux"
-        ? "Linux is currently a preview build. Core proxy routing is supported, but Headroom Learn and secure API key storage are disabled while the platform is hardened."
+        ? "Linux is currently a preview build. Core proxy routing for Claude Code and Codex is supported, but Headroom Learn and secure API key storage are disabled while the platform is hardened."
         : "This platform is currently in preview."
       : null;
   const headroomLearnSupported = runtimeStatus?.headroomLearnSupported !== false;
@@ -2975,14 +2978,7 @@ export default function App() {
     runtimeStatus?.headroomLearnDisabledReason ??
     "Headroom Learn is unavailable on this platform.";
 
-  const claudeConnector = getClaudeConnector(connectors);
-  const codexConnector = getCodexConnector(connectors);
-  const disabledConnector =
-    claudeConnector && !claudeConnector.enabled
-      ? claudeConnector
-      : codexConnector && !codexConnector.enabled
-        ? codexConnector
-        : null;
+  const disabledManagedConnectors = getDisabledManagedConnectors(connectors);
 
   const calloutBanner = (() => {
     if (!runtimeStatus) {
@@ -3126,12 +3122,14 @@ export default function App() {
                   <p className="callout-banner__subtitle">Now use your connected clients as normal, and check back later to see how much you are saving by using Headroom.</p>
                 )}
               </div>
-              {connectorPhase === "disabled" && disabledConnector && (
+              {connectorPhase === "disabled" && disabledManagedConnectors.length > 0 && (
                 <button
                   className="callout-banner__action"
                   disabled={connectorsBusy}
                   onClick={async () => {
-                    await toggleConnector(disabledConnector, true);
+                    for (const connector of disabledManagedConnectors) {
+                      await toggleConnector(connector, true);
+                    }
                     setConnectorPhase("verifying");
                   }}
                   type="button"
@@ -3211,7 +3209,7 @@ export default function App() {
                     </p>
                     <p className="optimize-minimal__meta">
                       Linux preview currently supports the core Headroom proxy,
-                      Claude Code routing, and RTK activity tracking.
+                      Claude Code and Codex routing, and RTK activity tracking.
                     </p>
                   </div>
                 ) : claudeProjectsBusy && claudeProjects.length === 0 ? (
@@ -3705,7 +3703,8 @@ export default function App() {
                 </div>
                 <p>
                   Reverses every change Headroom made: removes the managed Python runtime, the Claude Code
-                  hook, and restores <code>~/.claude/settings.json</code> changes. Headroom will quit when done.
+                  hook, Codex routing in <code>~/.codex/config.toml</code>, and restores{" "}
+                  <code>~/.claude/settings.json</code> changes. Headroom will quit when done.
                 </p>
                 <button
                   className="secondary-button secondary-button--small"
@@ -3780,6 +3779,7 @@ export default function App() {
                 <ul className="api-key-guide">
                   <li>Strip Headroom's hook and env from <code>~/.claude/settings.json</code> and <code>settings.local.json</code></li>
                   <li>Delete <code>~/.claude/hooks/headroom-rtk-rewrite.sh</code></li>
+                  <li>Remove Headroom routing from <code>~/.codex/config.toml</code> and managed shell blocks</li>
                   <li>Delete <code>~/Library/Application Support/Headroom</code> (logs, caches, setup state)</li>
                   <li>Delete <code>~/.headroom</code> (Python runtime)</li>
                   <li>Remove the LaunchAgent plist from <code>~/Library/LaunchAgents/</code> and disable the login item</li>
