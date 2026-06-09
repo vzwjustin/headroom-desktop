@@ -39,10 +39,16 @@ struct ManagedClientSpec {
     name: &'static str,
 }
 
-const MANAGED_CLIENT_SPECS: [ManagedClientSpec; 1] = [ManagedClientSpec {
-    id: "claude_code",
-    name: "Claude Code",
-}];
+const MANAGED_CLIENT_SPECS: [ManagedClientSpec; 2] = [
+    ManagedClientSpec {
+        id: "claude_code",
+        name: "Claude Code",
+    },
+    ManagedClientSpec {
+        id: "codex_cli",
+        name: "Codex",
+    },
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShellFamily {
@@ -54,10 +60,10 @@ enum ShellFamily {
 pub fn detect_clients() -> Vec<ClientStatus> {
     let setup_state = load_setup_state();
 
-    vec![detect_claude_code_client(is_configured(
-        &setup_state,
-        "claude_code",
-    ))]
+    vec![
+        detect_claude_code_client(is_configured(&setup_state, "claude_code")),
+        detect_codex_client(is_configured(&setup_state, "codex_cli")),
+    ]
 }
 
 pub fn ensure_rtk_integrations(
@@ -137,9 +143,16 @@ pub fn apply_client_setup(client_id: &str) -> Result<ClientSetupResult> {
             backup_files.extend(updates.1);
         }
         "codex" | "codex_cli" | "codex_gui" => {
-            return Err(anyhow!(
-                "Codex integration has been disabled. Headroom now focuses on Claude Code."
-            ))
+            let shell_targets = resolve_client_shell_targets(&state, client_id)?;
+            let mut updates = configure_codex_cli(&shell_targets)?;
+            changed_files.extend(updates.0);
+            backup_files.extend(updates.1);
+            if client_id == "codex_gui" {
+                configure_codex_gui()?;
+            }
+            state
+                .managed_shell_files
+                .insert(state_id.clone(), serialize_paths(&shell_targets));
         }
         other => return Err(anyhow!("Automatic setup is not supported yet for {other}.",)),
     }
@@ -157,6 +170,18 @@ pub fn apply_client_setup(client_id: &str) -> Result<ClientSetupResult> {
 
     let verification = verify_client_setup(client_id)?;
 
+    let next_steps = if matches!(client_id, "codex" | "codex_cli" | "codex_gui") {
+        vec![
+            "Restart your terminal session to pick up environment changes.".into(),
+            "Run one Codex prompt and verify activity appears in Headroom.".into(),
+        ]
+    } else {
+        vec![
+            "Restart your terminal/editor session to pick up environment changes.".into(),
+            "Run one Claude Code prompt and verify activity appears in Headroom.".into(),
+        ]
+    };
+
     Ok(ClientSetupResult {
         client_id: client_id.to_string(),
         applied: true,
@@ -164,10 +189,7 @@ pub fn apply_client_setup(client_id: &str) -> Result<ClientSetupResult> {
         summary,
         changed_files,
         backup_files,
-        next_steps: vec![
-            "Restart your terminal/editor session to pick up environment changes.".into(),
-            "Run one Claude Code prompt and verify activity appears in Headroom.".into(),
-        ],
+        next_steps,
         verification,
     })
 }
@@ -236,9 +258,37 @@ pub fn verify_client_setup(client_id: &str) -> Result<ClientSetupVerification> {
             return Ok(delegated);
         }
         "codex" | "codex_cli" | "codex_gui" => {
-            return Err(anyhow!(
-                "Codex integration has been disabled. Headroom now focuses on Claude Code."
-            ))
+            let state = load_setup_state();
+            let shell_targets = resolve_client_shell_targets(&state, client_id)?;
+            let config_ok = codex_config_routes_through_headroom()?;
+            let shell_ok = shell_block_contains_in_files(
+                &shell_targets,
+                "codex_cli",
+                "OPENAI_BASE_URL",
+                HEADROOM_OPENAI_BASE_URL,
+            )? || shell_block_contains_in_files(
+                &shell_targets,
+                "codex",
+                "OPENAI_BASE_URL",
+                HEADROOM_OPENAI_BASE_URL,
+            )?;
+
+            if config_ok {
+                checks.push(
+                    "Found Headroom openai_base_url in ~/.codex/config.toml.".into(),
+                );
+            }
+            if shell_ok {
+                checks.push(
+                    "Found Codex OPENAI_BASE_URL export in managed shell block.".into(),
+                );
+            }
+            if !config_ok && !shell_ok {
+                failures.push(
+                    "Codex routing was not found in ~/.codex/config.toml or managed shell blocks."
+                        .into(),
+                );
+            }
         }
         other => return Err(anyhow!("Verification is not supported yet for {other}.",)),
     }
@@ -263,6 +313,14 @@ pub fn verify_client_setup(client_id: &str) -> Result<ClientSetupVerification> {
 
 pub fn is_claude_code_enabled() -> bool {
     is_configured(&load_setup_state(), "claude_code")
+}
+
+pub fn is_codex_enabled() -> bool {
+    is_configured(&load_setup_state(), "codex_cli")
+}
+
+pub fn is_any_managed_client_enabled() -> bool {
+    is_claude_code_enabled() || is_codex_enabled()
 }
 
 pub fn list_client_connectors(
@@ -750,9 +808,13 @@ fn normalize_setup_state(mut state: ClientSetupState) -> ClientSetupState {
 }
 
 fn normalize_setup_entries(mut entries: BTreeMap<String, String>) -> BTreeMap<String, String> {
-    entries.remove("codex_cli");
-    entries.remove("codex");
-    entries.remove("codex_gui");
+    for alias in ["codex", "codex_gui"] {
+        if let Some(timestamp) = entries.remove(alias) {
+            entries
+                .entry("codex_cli".into())
+                .or_insert(timestamp);
+        }
+    }
 
     entries
 }
@@ -760,9 +822,14 @@ fn normalize_setup_entries(mut entries: BTreeMap<String, String>) -> BTreeMap<St
 fn normalize_shell_file_entries(
     mut entries: BTreeMap<String, Vec<String>>,
 ) -> BTreeMap<String, Vec<String>> {
-    entries.remove("codex_cli");
-    entries.remove("codex");
-    entries.remove("codex_gui");
+    for alias in ["codex", "codex_gui"] {
+        if let Some(files) = entries.remove(alias) {
+            entries
+                .entry("codex_cli".into())
+                .or_insert_with(Vec::new)
+                .extend(files);
+        }
+    }
 
     for files in entries.values_mut() {
         dedupe_strings(files);
@@ -908,6 +975,39 @@ fn ensure_claude_code_rtk_hook(
     backup_files.extend(settings_backups);
 
     Ok((changed_files, backup_files))
+}
+
+fn configure_codex_cli(shell_targets: &[PathBuf]) -> Result<(Vec<String>, Vec<String>)> {
+    let mut changed_files = Vec::new();
+    let mut backup_files = Vec::new();
+
+    // Modern Codex reads openai_base_url directly; keep shell exports as a
+    // fallback for terminals and older installs.
+    let (key_changed, key_backup) =
+        upsert_codex_toml_key("openai_base_url", HEADROOM_OPENAI_BASE_URL)?;
+    changed_files.extend(key_changed);
+    backup_files.extend(key_backup);
+
+    let env_block = format!(
+        "export OPENAI_BASE_URL={HEADROOM_OPENAI_BASE_URL}\nexport OPENAI_API_BASE={HEADROOM_OPENAI_BASE_URL}"
+    );
+    let mut shell_updates = configure_shell_block(shell_targets, "codex_cli", &env_block)?;
+    let mut legacy_shell_updates = configure_shell_block(shell_targets, "codex", &env_block)?;
+    shell_updates.0.append(&mut legacy_shell_updates.0);
+    shell_updates.1.append(&mut legacy_shell_updates.1);
+    changed_files.extend(shell_updates.0);
+    backup_files.extend(shell_updates.1);
+
+    Ok((changed_files, backup_files))
+}
+
+fn configure_codex_gui() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        set_launchctl_env("OPENAI_BASE_URL", HEADROOM_OPENAI_BASE_URL)?;
+        set_launchctl_env("OPENAI_API_BASE", HEADROOM_OPENAI_BASE_URL)?;
+    }
+    Ok(())
 }
 
 fn disable_codex_cli() -> Result<()> {
@@ -1257,6 +1357,67 @@ fn remove_codex_toml_key(key: &str, expected_value: &str) -> Result<()> {
         result.push('\n');
     }
     std::fs::write(&path, result).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
+}
+
+fn upsert_codex_toml_key(key: &str, value: &str) -> Result<(Vec<String>, Vec<String>)> {
+    let path = codex_config_toml_path();
+    let target_line = format!("{key} = \"{value}\"");
+    let existing = if path.exists() {
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?
+    } else {
+        String::new()
+    };
+
+    if existing.lines().any(|line| line.trim() == target_line) {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let prefix = format!("{key} =");
+    let filtered: Vec<&str> = existing
+        .lines()
+        .filter(|line| !line.trim().starts_with(&prefix))
+        .collect();
+    let mut updated = filtered.join("\n");
+    if !updated.is_empty() && !updated.ends_with('\n') {
+        updated.push('\n');
+    }
+    updated.push_str(&target_line);
+    updated.push('\n');
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+
+    let backup = backup_if_exists(&path)?;
+    std::fs::write(&path, updated).with_context(|| format!("writing {}", path.display()))?;
+
+    Ok((
+        vec![path.display().to_string()],
+        backup
+            .into_iter()
+            .map(|entry| entry.display().to_string())
+            .collect(),
+    ))
+}
+
+fn codex_config_routes_through_headroom() -> Result<bool> {
+    let path = codex_config_toml_path();
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(content.contains(&format!(
+        "openai_base_url = \"{HEADROOM_OPENAI_BASE_URL}\""
+    )))
+}
+
+fn set_launchctl_env(key: &str, value: &str) -> Result<()> {
+    run_launchctl(&["setenv", key, value])?;
     Ok(())
 }
 
@@ -1808,6 +1969,52 @@ fn home_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir())
 }
 
+fn detect_codex_client(configured: bool) -> ClientStatus {
+    let executable = find_on_path(&["codex"]);
+    let codex_home = home_dir().join(".codex");
+    let config_path = codex_config_toml_path();
+
+    if executable.is_some() || config_path.exists() || codex_home.is_dir() {
+        return ClientStatus {
+            id: "codex_cli".into(),
+            name: "Codex".into(),
+            installed: true,
+            configured,
+            health: if configured {
+                ClientHealth::Healthy
+            } else {
+                ClientHealth::Attention
+            },
+            notes: if configured {
+                vec![
+                    executable
+                        .as_ref()
+                        .map(|path| format!("Detected at {}", path.display()))
+                        .unwrap_or_else(|| "Detected Codex config in ~/.codex.".into()),
+                    "Configured by Headroom.".into(),
+                ]
+            } else {
+                vec![
+                    executable
+                        .as_ref()
+                        .map(|path| format!("Detected at {}", path.display()))
+                        .unwrap_or_else(|| "Detected Codex config in ~/.codex.".into()),
+                    "Route Codex through Headroom's localhost proxy so prompts stay lean.".into(),
+                ]
+            },
+        };
+    }
+
+    ClientStatus {
+        id: "codex_cli".into(),
+        name: "Codex".into(),
+        installed: false,
+        configured: false,
+        health: ClientHealth::NotDetected,
+        notes: vec!["Not detected on this machine yet.".into()],
+    }
+}
+
 fn detect_claude_code_client(configured: bool) -> ClientStatus {
     let executable = claude_code_candidate_paths()
         .into_iter()
@@ -2031,7 +2238,7 @@ mod tests {
     };
 
     #[test]
-    fn normalize_setup_state_removes_legacy_codex_entries() {
+    fn normalize_setup_state_collapses_legacy_codex_aliases() {
         let state = ClientSetupState {
             configured_clients: BTreeMap::from([
                 ("claude_code".into(), "2026-03-27T10:00:00Z".into()),
@@ -2054,16 +2261,21 @@ mod tests {
 
         let normalized = normalize_setup_state(state);
 
-        assert_eq!(normalized.configured_clients.len(), 1);
+        assert_eq!(normalized.configured_clients.len(), 2);
         assert!(normalized.configured_clients.contains_key("claude_code"));
-        assert_eq!(normalized.remembered_clients.len(), 1);
+        assert!(normalized.configured_clients.contains_key("codex_cli"));
+        assert!(!normalized.configured_clients.contains_key("codex_gui"));
+        assert_eq!(normalized.remembered_clients.len(), 2);
         assert!(normalized.remembered_clients.contains_key("claude_code"));
-        assert_eq!(normalized.managed_shell_files.len(), 1);
+        assert!(normalized.remembered_clients.contains_key("codex_cli"));
+        assert_eq!(normalized.managed_shell_files.len(), 2);
         assert!(normalized.managed_shell_files.contains_key("claude_code"));
-        assert_eq!(normalized.remembered_shell_files.len(), 1);
+        assert!(normalized.managed_shell_files.contains_key("codex_cli"));
+        assert_eq!(normalized.remembered_shell_files.len(), 2);
         assert!(normalized
             .remembered_shell_files
             .contains_key("claude_code"));
+        assert!(normalized.remembered_shell_files.contains_key("codex_cli"));
     }
 
     #[test]
@@ -3060,12 +3272,55 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:6767
 
     #[test]
     #[serial_test::serial]
-    fn apply_client_setup_rejects_codex() {
-        let _home = TestHome::new();
-        let err = super::apply_client_setup("codex").expect_err("codex disabled");
+    fn apply_client_setup_configures_codex() {
+        let home = TestHome::new();
+        let result = super::apply_client_setup("codex_cli").expect("apply codex");
+        assert_eq!(result.client_id, "codex_cli");
+        assert!(result.verification.verified, "{:?}", result.verification);
+
+        let config_path = home.path().join(".codex").join("config.toml");
+        let config = std::fs::read_to_string(&config_path).expect("codex config");
         assert!(
-            err.to_string().contains("Codex integration has been disabled"),
-            "unexpected error message: {err}"
+            config.contains("openai_base_url = \"http://127.0.0.1:6767/v1\""),
+            "config missing openai_base_url, got:\n{config}"
+        );
+        assert!(
+            !config.contains("# >>> headroom:codex_cli >>>"),
+            "config should not add a managed provider block, got:\n{config}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.path().join(".zshrc")).expect("zshrc");
+        assert!(
+            zshrc.contains("export OPENAI_BASE_URL=http://127.0.0.1:6767/v1"),
+            "shell block missing OPENAI_BASE_URL, got:\n{zshrc}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disable_client_setup_clears_codex() {
+        let home = TestHome::new();
+        super::apply_client_setup("codex_cli").expect("apply codex");
+        super::disable_client_setup("codex_cli").expect("disable codex");
+
+        let config_path = home.path().join(".codex").join("config.toml");
+        let config = std::fs::read_to_string(&config_path).expect("codex config");
+        assert!(
+            !config.contains("openai_base_url = \"http://127.0.0.1:6767/v1\""),
+            "config still routes through Headroom, got:\n{config}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.path().join(".zshrc")).expect("zshrc");
+        assert!(
+            !zshrc.contains("export OPENAI_BASE_URL=http://127.0.0.1:6767/v1"),
+            "shell block still present, got:\n{zshrc}"
+        );
+
+        let state = super::load_setup_state();
+        assert!(
+            state.configured_clients.get("codex_cli").is_none(),
+            "codex_cli still configured, got: {:?}",
+            state.configured_clients
         );
     }
 

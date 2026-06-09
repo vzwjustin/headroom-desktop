@@ -57,14 +57,38 @@ export function getClaudeConnector(connectors: ClientConnectorStatus[]) {
   );
 }
 
+export function getCodexConnector(connectors: ClientConnectorStatus[]) {
+  return (
+    aggregateClientConnectors(connectors).find(
+      (connector) => connector.clientId === "codex_cli"
+    ) ?? null
+  );
+}
+
+export function getManagedConnectors(connectors: ClientConnectorStatus[]) {
+  return aggregateClientConnectors(connectors);
+}
+
+export function getInstalledManagedConnectors(connectors: ClientConnectorStatus[]) {
+  return getManagedConnectors(connectors).filter((connector) => connector.installed);
+}
+
+export function getConnectorsNeedingSetup(connectors: ClientConnectorStatus[]) {
+  return getInstalledManagedConnectors(connectors).filter((connector) => !connector.enabled);
+}
+
+export function isAnyManagedConnectorEnabled(connectors: ClientConnectorStatus[]) {
+  return getManagedConnectors(connectors).some((connector) => connector.enabled);
+}
+
 export function getLauncherAutoConfigureDecision(
   connectors: ClientConnectorStatus[]
 ): LauncherAutoConfigureDecision {
-  const connector = getClaudeConnector(connectors);
-  if (!connector?.installed) {
+  const installed = getInstalledManagedConnectors(connectors);
+  if (installed.length === 0) {
     return "show_client_setup";
   }
-  if (!connector.enabled) {
+  if (getConnectorsNeedingSetup(connectors).length > 0) {
     return "apply_client_setup";
   }
   return "begin_proxy_verification";
@@ -92,17 +116,17 @@ export function getInitialLauncherStage(
 /// given a fresh connector probe. Pre-apply only.
 export function nextAutoConfigureStep(
   decision: LauncherAutoConfigureDecision,
-  claudeConnector: ClientConnectorStatus | null
+  connectorsNeedingSetup: ClientConnectorStatus[]
 ): AutoConfigureStep {
   if (decision === "show_client_setup") {
     return { kind: "show_client_setup" };
   }
   if (decision === "apply_client_setup") {
-    if (!claudeConnector) {
-      // No connector to apply against — fall back to manual setup.
+    const nextConnector = connectorsNeedingSetup[0] ?? null;
+    if (!nextConnector) {
       return { kind: "show_client_setup" };
     }
-    return { kind: "apply", clientId: claudeConnector.clientId };
+    return { kind: "apply", clientId: nextConnector.clientId };
   }
   return { kind: "begin_proxy_verification" };
 }
@@ -120,6 +144,18 @@ export function nextAutoConfigureStepAfterApply(
   return { kind: "show_client_setup" };
 }
 
+const proxyVerificationWaitingMessage: Record<string, string> = {
+  claude_code: "Waiting for a Claude Code prompt...",
+  codex_cli: "Waiting for a Codex prompt..."
+};
+
+export function proxyVerificationWaitingCopy(clientId: string) {
+  return (
+    proxyVerificationWaitingMessage[clientId] ??
+    `Waiting for a ${clientId} prompt...`
+  );
+}
+
 export function buildInitialProxyVerificationRows(
   connectors: ClientConnectorStatus[]
 ): ProxyVerificationRowState[] {
@@ -130,6 +166,6 @@ export function buildInitialProxyVerificationRows(
       clientId: connector.clientId,
       name: connector.name,
       state: "processing",
-      message: "Waiting for a Claude Code prompt..."
+      message: proxyVerificationWaitingCopy(connector.clientId)
     }));
 }
