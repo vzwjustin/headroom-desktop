@@ -3113,15 +3113,15 @@ fn spawn_tray_runtime_icon_updater(app: AppHandle) {
         let mut last_connector_check = std::time::Instant::now()
             .checked_sub(std::time::Duration::from_secs(60))
             .unwrap_or_else(std::time::Instant::now);
-        let mut cached_connector_enabled: bool = client_adapters::is_claude_code_enabled();
+        let mut cached_connector_enabled: bool = client_adapters::is_any_managed_client_enabled();
 
         loop {
-            // Re-check the Claude connector at most every ~2s, regardless of
+            // Re-check managed client connectors at most every ~2s, regardless of
             // whether the tick rate is booting-fast (260ms) or idle-slow
             // (1500ms). Time-based instead of tick-count based so the cadence
             // stays correct across the adaptive sleep below.
             if last_connector_check.elapsed() >= std::time::Duration::from_secs(2) {
-                cached_connector_enabled = client_adapters::is_claude_code_enabled();
+                cached_connector_enabled = client_adapters::is_any_managed_client_enabled();
                 last_connector_check = std::time::Instant::now();
             }
 

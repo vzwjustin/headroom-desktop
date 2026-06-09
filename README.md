@@ -19,7 +19,7 @@
 
 Headroom is signed and notarized, so macOS will open it without Gatekeeper warnings.
 
-Linux preview artifacts are published on the same release page. Today they are best treated as a preview for the core Headroom proxy, Claude Code routing, and RTK flow. `Headroom Learn` is not supported yet on Linux preview builds.
+Linux preview artifacts are published on the same release page. Today they are best treated as a preview for the core Headroom proxy, Claude Code and Codex routing, and RTK flow. `Headroom Learn` is not supported yet on Linux preview builds.
 
 ---
 
@@ -27,7 +27,7 @@ Linux preview artifacts are published on the same release page. Today they are b
 
 ---
 
-> **Note:** Headroom currently supports **Claude Code** only. Support for additional clients is planned.
+> **Note:** Headroom currently supports **Claude Code** and **Codex**. Additional clients are planned.
 
 Headroom is a local-first desktop tray app that routes your coding clients through a local optimization pipeline. The stable target is macOS; Linux builds are currently experimental. It installs and manages a self-contained Python runtime, bundles proven token-saving tools, and surfaces savings analytics — all without touching your system environment.
 
@@ -49,16 +49,17 @@ Full disclosure of every location Headroom writes to, so you can decide before i
 
 - Downloads a self-contained Python runtime (~2 GB) to `~/.headroom`. Your system Python is untouched.
 - Adds a `PreToolUse` hook to `~/.claude/settings.json` and a script at `~/.claude/hooks/headroom-rtk-rewrite.sh` so Claude Code routes through Headroom. A timestamped backup of `settings.json` is written before any edit.
+- Points Codex at `http://127.0.0.1:6767/v1` by setting `openai_base_url` in `~/.codex/config.toml` and exporting `OPENAI_BASE_URL` in your shell profiles.
 - Creates `~/Library/Application Support/Headroom` for logs, caches, and per-client setup state.
 - Stores your Headroom session token in the macOS Keychain under services prefixed `com.extraheadroom.headroom`.
 - If you opt into "launch at login," installs a LaunchAgent plist at `~/Library/LaunchAgents/`. Never added otherwise.
 - Adds a managed block to your shell profile (`.zshrc`, `.zprofile`, etc.) that prepends `~/.headroom/bin` to `PATH` so `rtk` is available in your terminals. Every managed block is fenced with `# >>> headroom:... >>>` markers and can be removed by hand if you prefer.
 
-**On quit (or pause):** Headroom tears down everything that would intercept Claude Code — the hook entry, the hook script, the `ANTHROPIC_BASE_URL` redirect, and the managed shell blocks. Claude Code behaves exactly as it did before Headroom was launched. The Python runtime, logs, and keychain entries stay on disk so the next launch is fast.
+**On quit (or pause):** Headroom tears down everything that would intercept Claude Code and Codex — the hook entry, the hook script, the `ANTHROPIC_BASE_URL` redirect, Codex `openai_base_url`, and the managed shell blocks. Your clients behave exactly as they did before Headroom was launched. The Python runtime, logs, and keychain entries stay on disk so the next launch is fast.
 
 **On uninstall (Settings → Uninstall Headroom):** Everything listed above is removed, including the LaunchAgent plist, `~/Library/Preferences/com.extraheadroom.headroom*`, `~/Library/Caches/com.extraheadroom.headroom`, and the keychain entries. The uninstall dialog in the app shows the full list before you confirm.
 
-If the proxy dies unexpectedly, a watchdog restarts it; after repeated failures it auto-pauses and strips interception so Claude Code keeps working without intervention.
+If the proxy dies unexpectedly, a watchdog restarts it; after repeated failures it auto-pauses and strips interception so your clients keep working without intervention.
 
 ## Bundled tools
 

@@ -266,12 +266,16 @@ pub fn verify_client_setup(client_id: &str) -> Result<ClientSetupVerification> {
                 "codex_cli",
                 "OPENAI_BASE_URL",
                 HEADROOM_OPENAI_BASE_URL,
+            )? || shell_block_contains_in_files(
+                &shell_targets,
+                "codex",
+                "OPENAI_BASE_URL",
+                HEADROOM_OPENAI_BASE_URL,
             )?;
 
             if config_ok {
                 checks.push(
-                    "Found Headroom routing in ~/.codex/config.toml (openai_base_url or managed provider block)."
-                        .into(),
+                    "Found Headroom openai_base_url in ~/.codex/config.toml.".into(),
                 );
             }
             if shell_ok {
@@ -309,6 +313,14 @@ pub fn verify_client_setup(client_id: &str) -> Result<ClientSetupVerification> {
 
 pub fn is_claude_code_enabled() -> bool {
     is_configured(&load_setup_state(), "claude_code")
+}
+
+pub fn is_codex_enabled() -> bool {
+    is_configured(&load_setup_state(), "codex_cli")
+}
+
+pub fn is_any_managed_client_enabled() -> bool {
+    is_claude_code_enabled() || is_codex_enabled()
 }
 
 pub fn list_client_connectors(
@@ -966,22 +978,11 @@ fn ensure_claude_code_rtk_hook(
 }
 
 fn configure_codex_cli(shell_targets: &[PathBuf]) -> Result<(Vec<String>, Vec<String>)> {
-    let provider_block = format!(
-        "model_provider = \"headroom\"\n\n[model_providers.headroom]\nname = \"Headroom\"\nbase_url = \"{HEADROOM_OPENAI_BASE_URL}\"\nwire_api = \"responses\"\nenv_key = \"OPENAI_API_KEY\""
-    );
-    let path = codex_config_toml_path();
     let mut changed_files = Vec::new();
     let mut backup_files = Vec::new();
 
-    let (config_block_changed, config_block_backup) =
-        upsert_managed_block(&path, "codex_cli", &provider_block)?;
-    if config_block_changed {
-        changed_files.push(path.display().to_string());
-    }
-    if let Some(backup) = config_block_backup {
-        backup_files.push(backup.display().to_string());
-    }
-
+    // Modern Codex reads openai_base_url directly; keep shell exports as a
+    // fallback for terminals and older installs.
     let (key_changed, key_backup) =
         upsert_codex_toml_key("openai_base_url", HEADROOM_OPENAI_BASE_URL)?;
     changed_files.extend(key_changed);
@@ -1410,14 +1411,9 @@ fn codex_config_routes_through_headroom() -> Result<bool> {
 
     let content =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-    let has_openai_base_url = content.contains(&format!(
+    Ok(content.contains(&format!(
         "openai_base_url = \"{HEADROOM_OPENAI_BASE_URL}\""
-    ));
-    let has_provider_block = content.contains(&format!(
-        "base_url = \"{HEADROOM_OPENAI_BASE_URL}\""
-    )) && content.contains("# >>> headroom:codex_cli >>>");
-
-    Ok(has_openai_base_url || has_provider_block)
+    )))
 }
 
 fn set_launchctl_env(key: &str, value: &str) -> Result<()> {
@@ -3289,14 +3285,42 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:6767
             "config missing openai_base_url, got:\n{config}"
         );
         assert!(
-            config.contains("# >>> headroom:codex_cli >>>"),
-            "config missing managed provider block, got:\n{config}"
+            !config.contains("# >>> headroom:codex_cli >>>"),
+            "config should not add a managed provider block, got:\n{config}"
         );
 
         let zshrc = std::fs::read_to_string(home.path().join(".zshrc")).expect("zshrc");
         assert!(
             zshrc.contains("export OPENAI_BASE_URL=http://127.0.0.1:6767/v1"),
             "shell block missing OPENAI_BASE_URL, got:\n{zshrc}"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn disable_client_setup_clears_codex() {
+        let home = TestHome::new();
+        super::apply_client_setup("codex_cli").expect("apply codex");
+        super::disable_client_setup("codex_cli").expect("disable codex");
+
+        let config_path = home.path().join(".codex").join("config.toml");
+        let config = std::fs::read_to_string(&config_path).expect("codex config");
+        assert!(
+            !config.contains("openai_base_url = \"http://127.0.0.1:6767/v1\""),
+            "config still routes through Headroom, got:\n{config}"
+        );
+
+        let zshrc = std::fs::read_to_string(home.path().join(".zshrc")).expect("zshrc");
+        assert!(
+            !zshrc.contains("export OPENAI_BASE_URL=http://127.0.0.1:6767/v1"),
+            "shell block still present, got:\n{zshrc}"
+        );
+
+        let state = super::load_setup_state();
+        assert!(
+            state.configured_clients.get("codex_cli").is_none(),
+            "codex_cli still configured, got: {:?}",
+            state.configured_clients
         );
     }
 
