@@ -39,6 +39,7 @@ import {
 import headroomLogo from "./assets/headroom-logo.svg";
 import packageJson from "../package.json";
 import {
+  formatAppUpdateProgressCopy,
   getAppUpdateInstallStatusCopy,
   getBlockedAppUpdateCheckPatch,
   loadAppUpdateConfiguration,
@@ -1875,7 +1876,15 @@ export default function App() {
     }
 
     try {
-      applyAppUpdatePatch(await runAppUpdateInstall({ availableUpdate: appUpdateAvailable }));
+      const versionForCopy = appUpdateAvailable.version;
+      applyAppUpdatePatch(
+        await runAppUpdateInstall({
+          availableUpdate: appUpdateAvailable,
+          onProgress: (progress) => {
+            setAppUpdateStatusCopy(formatAppUpdateProgressCopy(versionForCopy, progress));
+          },
+        })
+      );
     } finally {
       setAppUpdateInstallBusy(false);
     }
