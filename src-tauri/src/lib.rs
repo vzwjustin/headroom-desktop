@@ -22,7 +22,8 @@ use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 
@@ -81,9 +82,27 @@ impl QuitSource {
     }
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "phase")]
+enum AppUpdateProgress {
+    #[serde(rename = "downloading")]
+    Downloading { downloaded: u64, total: Option<u64> },
+    #[serde(rename = "installing")]
+    Installing,
+}
+
+const APP_UPDATE_PROGRESS_EVENT: &str = "app-update://progress";
+
+type AppUpdateProgressEmitter = Arc<dyn Fn(AppUpdateProgress) + Send + Sync + 'static>;
+
+#[cfg(test)]
+fn noop_app_update_progress_emitter() -> AppUpdateProgressEmitter {
+    Arc::new(|_| {})
+}
+
 trait InstallableAppUpdate: Send {
     fn metadata(&self) -> AvailableAppUpdate;
-    fn install(self) -> InstallPendingUpdateFuture;
+    fn install(self, progress: AppUpdateProgressEmitter) -> InstallPendingUpdateFuture;
 }
 
 struct TauriPendingUpdate(Update);
@@ -103,10 +122,27 @@ impl InstallableAppUpdate for TauriPendingUpdate {
         }
     }
 
-    fn install(self) -> InstallPendingUpdateFuture {
+    fn install(self, progress: AppUpdateProgressEmitter) -> InstallPendingUpdateFuture {
         Box::pin(async move {
+            let downloaded = Arc::new(AtomicU64::new(0));
+            let on_chunk_downloaded = Arc::clone(&downloaded);
+            let on_chunk_progress = Arc::clone(&progress);
+            let on_finish_progress = Arc::clone(&progress);
             self.0
-                .download_and_install(|_, _| {}, || {})
+                .download_and_install(
+                    move |chunk_len, content_length| {
+                        let total = on_chunk_downloaded
+                            .fetch_add(chunk_len as u64, Ordering::Relaxed)
+                            + chunk_len as u64;
+                        on_chunk_progress(AppUpdateProgress::Downloading {
+                            downloaded: total,
+                            total: content_length,
+                        });
+                    },
+                    move || {
+                        on_finish_progress(AppUpdateProgress::Installing);
+                    },
+                )
                 .await
                 .map_err(|err| err.to_string())
         })
@@ -277,8 +313,15 @@ async fn check_for_app_update(
 }
 
 #[tauri::command]
-async fn install_app_update(pending_update: State<'_, PendingAppUpdate>) -> Result<(), String> {
-    install_pending_update(&pending_update.0).await
+async fn install_app_update(
+    app: AppHandle,
+    pending_update: State<'_, PendingAppUpdate>,
+) -> Result<(), String> {
+    let emitter_app = app.clone();
+    let emitter: AppUpdateProgressEmitter = Arc::new(move |event| {
+        let _ = emitter_app.emit(APP_UPDATE_PROGRESS_EVENT, &event);
+    });
+    install_pending_update(&pending_update.0, emitter).await
 }
 
 fn store_checked_update<U>(
@@ -301,7 +344,10 @@ where
     }
 }
 
-async fn install_pending_update<U>(pending_update: &Mutex<Option<U>>) -> Result<(), String>
+async fn install_pending_update<U>(
+    pending_update: &Mutex<Option<U>>,
+    progress: AppUpdateProgressEmitter,
+) -> Result<(), String>
 where
     U: InstallableAppUpdate,
 {
@@ -312,7 +358,7 @@ where
             .ok_or_else(|| "No downloaded update is ready to install.".to_string())?
     };
 
-    update.install().await
+    update.install(progress).await
 }
 
 #[tauri::command]
@@ -326,7 +372,52 @@ fn restart_app(app: AppHandle) {
         state.stop_headroom();
     }
     analytics::shutdown(&app);
-    app.request_restart();
+
+    // Tauri 2.x has an open bug on macOS (tauri-apps/tauri#13923, #11392)
+    // where `request_restart()` and `restart()` exit the process but never
+    // relaunch — especially with `tauri-plugin-single-instance` loaded.
+    // Workaround: spawn a detached relauncher via `open -n` against this
+    // app's .app bundle (which is in-place updated by the updater), then
+    // exit cleanly so the single-instance lock is released before the new
+    // process starts.
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bundle) = current_app_bundle_path() {
+            // Tiny sleep so the relaunch fires after our exit releases the
+            // single-instance lock; without it the new process can detect
+            // the still-dying old one and bail.
+            let cmd = format!(
+                "sleep 1 && /usr/bin/open -n {}",
+                shell_quote_path(&bundle)
+            );
+            let _ = Command::new("/bin/sh").arg("-c").arg(cmd).spawn();
+        }
+        app.exit(0);
+        return;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        app.request_restart();
+    }
+}
+
+/// Walks up from `current_exe` to find the enclosing `.app` bundle path.
+#[cfg(target_os = "macos")]
+fn current_app_bundle_path() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    exe.ancestors()
+        .find(|p| p.extension().is_some_and(|ext| ext == "app"))
+        .map(|p| p.to_path_buf())
+}
+
+#[cfg(target_os = "macos")]
+fn shell_quote_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    // POSIX single-quote escaping: anything inside '...' is literal except
+    // ', which we close-escape-open. Safe against spaces / special chars in
+    // the bundle path (e.g. `/Applications/Headroom RC.app`).
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[tauri::command]
@@ -2019,7 +2110,11 @@ fn track_analytics_event(app: AppHandle, name: String, properties: Option<Value>
 }
 
 #[tauri::command]
-async fn submit_contact_request(url: String, email: String) -> Result<(), String> {
+async fn submit_contact_request(
+    url: String,
+    email: String,
+    message: Option<String>,
+) -> Result<(), String> {
     let trimmed = email.trim();
     if trimmed.is_empty() || !trimmed.contains('@') {
         return Err("Enter a valid email address.".to_string());
@@ -2032,15 +2127,24 @@ async fn submit_contact_request(url: String, email: String) -> Result<(), String
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|err| err.to_string())?;
+    let message_owned = message
+        .map(|m| m.trim().chars().take(2000).collect::<String>())
+        .unwrap_or_default();
     let response = client
         .post(target)
-        .form(&[("contact_request[email]", trimmed)])
+        .form(&[
+            ("contact_request[email]", trimmed),
+            ("contact_request[message]", message_owned.as_str()),
+        ])
         .send()
         .await
         .map_err(|err| err.to_string())?;
 
+    // Rails answers a successful POST with a 302 to /#pricing. Redirect policy
+    // is none for SSRF defense, so accept 3xx as success here. 422 and 503 are
+    // the controller's explicit error renders.
     match response.status().as_u16() {
-        200..=299 => Ok(()),
+        200..=399 => Ok(()),
         422 => Err("Enter a valid email address.".to_string()),
         503 => Err("Email delivery still needs to be configured.".to_string()),
         status => Err(format!("Contact request failed with status {status}.")),
@@ -3926,18 +4030,20 @@ mod tests {
         check_headroom_learn_prereqs, classify_bootstrap_failure, classify_upgrade_error,
         compute_tray_window_position, count_memories_created_today, debounced_tray_runtime_visual,
         delete_applied_pattern, empty_live_learnings_for_projects, extract_llm_failure_warnings,
-        fetch_transformations_feed_from, install_pending_update, is_endpoint_protection_signal,
+        fetch_transformations_feed_from, install_pending_update,
+        noop_app_update_progress_emitter, is_endpoint_protection_signal,
         is_port_conflict_failure, is_prerelease_version, lifetime_token_milestone_kind,
         parse_live_learnings, parse_request_count_from_stats_body, parse_updater_endpoint_list,
         pattern_matches_project, physical_rect_from_rect, read_applied_patterns_for_project,
         resolve_release_updater_config, select_updater_endpoints, store_checked_update,
-        watchdog_should_be_up, AvailableAppUpdate, BootstrapFailureKind,
-        HeadroomLearnPrereqStatus, InstallPendingUpdateFuture, InstallableAppUpdate,
-        MonitorBounds, PhysicalRect, QuitSource, TrayRuntimeVisual, DEFAULT_UPDATER_ENDPOINT,
-        DEFAULT_UPDATER_PUBLIC_KEY,
+        watchdog_should_be_up, AppUpdateProgress, AppUpdateProgressEmitter, AvailableAppUpdate,
+        BootstrapFailureKind, HeadroomLearnPrereqStatus, InstallPendingUpdateFuture,
+        InstallableAppUpdate, MonitorBounds, PhysicalRect, QuitSource, TrayRuntimeVisual,
+        DEFAULT_UPDATER_ENDPOINT, DEFAULT_UPDATER_PUBLIC_KEY,
     };
     use parking_lot::Mutex;
     use serde_json::json;
+    use std::sync::Arc;
     use tauri::{LogicalPosition, LogicalSize, PhysicalSize, Position, Rect, Size};
 
     struct FakePendingUpdate {
@@ -3950,7 +4056,7 @@ mod tests {
             self.metadata.clone()
         }
 
-        fn install(self) -> InstallPendingUpdateFuture {
+        fn install(self, _progress: AppUpdateProgressEmitter) -> InstallPendingUpdateFuture {
             Box::pin(async move { self.install_result })
         }
     }
@@ -4365,7 +4471,10 @@ mod tests {
             .expect("tokio runtime");
 
         let error = runtime
-            .block_on(install_pending_update(&pending))
+            .block_on(install_pending_update(
+                &pending,
+                noop_app_update_progress_emitter(),
+            ))
             .expect_err("missing update should fail");
 
         assert_eq!(error, "No downloaded update is ready to install.");
@@ -4383,10 +4492,116 @@ mod tests {
             .expect("tokio runtime");
 
         runtime
-            .block_on(install_pending_update(&pending))
+            .block_on(install_pending_update(
+                &pending,
+                noop_app_update_progress_emitter(),
+            ))
             .expect("install succeeds");
 
         assert!(pending.lock().is_none());
+    }
+
+    #[test]
+    fn install_pending_update_forwards_progress_to_emitter() {
+        struct ProgressEmittingFake {
+            metadata: AvailableAppUpdate,
+            events: Vec<AppUpdateProgress>,
+        }
+
+        impl InstallableAppUpdate for ProgressEmittingFake {
+            fn metadata(&self) -> AvailableAppUpdate {
+                self.metadata.clone()
+            }
+
+            fn install(self, progress: AppUpdateProgressEmitter) -> InstallPendingUpdateFuture {
+                Box::pin(async move {
+                    for event in self.events {
+                        progress(event);
+                    }
+                    Ok(())
+                })
+            }
+        }
+
+        let pending = Mutex::new(Some(ProgressEmittingFake {
+            metadata: sample_available_update("0.3.0"),
+            events: vec![
+                AppUpdateProgress::Downloading {
+                    downloaded: 1_024,
+                    total: Some(2_048),
+                },
+                AppUpdateProgress::Downloading {
+                    downloaded: 2_048,
+                    total: Some(2_048),
+                },
+                AppUpdateProgress::Installing,
+            ],
+        }));
+        let captured: Arc<Mutex<Vec<AppUpdateProgress>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured_for_emit = Arc::clone(&captured);
+        let emitter: AppUpdateProgressEmitter = Arc::new(move |event| {
+            captured_for_emit.lock().push(event);
+        });
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime
+            .block_on(install_pending_update(&pending, emitter))
+            .expect("install succeeds");
+
+        let events = captured.lock().clone();
+        assert_eq!(
+            events,
+            vec![
+                AppUpdateProgress::Downloading {
+                    downloaded: 1_024,
+                    total: Some(2_048),
+                },
+                AppUpdateProgress::Downloading {
+                    downloaded: 2_048,
+                    total: Some(2_048),
+                },
+                AppUpdateProgress::Installing,
+            ]
+        );
+    }
+
+    #[test]
+    fn app_update_progress_serializes_with_phase_tag() {
+        let downloading = serde_json::to_value(&AppUpdateProgress::Downloading {
+            downloaded: 1024,
+            total: Some(4096),
+        })
+        .expect("serialize downloading");
+        assert_eq!(
+            downloading,
+            serde_json::json!({
+                "phase": "downloading",
+                "downloaded": 1024,
+                "total": 4096,
+            })
+        );
+
+        let installing =
+            serde_json::to_value(&AppUpdateProgress::Installing).expect("serialize installing");
+        assert_eq!(installing, serde_json::json!({ "phase": "installing" }));
+
+        let unknown_total = serde_json::to_value(&AppUpdateProgress::Downloading {
+            downloaded: 512,
+            total: None,
+        })
+        .expect("serialize downloading with unknown total");
+        assert_eq!(
+            unknown_total,
+            serde_json::json!({
+                "phase": "downloading",
+                "downloaded": 512,
+                "total": null,
+            })
+        );
     }
 
     #[test]
@@ -4401,7 +4616,10 @@ mod tests {
             .expect("tokio runtime");
 
         let error = runtime
-            .block_on(install_pending_update(&pending))
+            .block_on(install_pending_update(
+                &pending,
+                noop_app_update_progress_emitter(),
+            ))
             .expect_err("install failure");
 
         assert_eq!(error, "signature mismatch");
