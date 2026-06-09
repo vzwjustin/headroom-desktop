@@ -3,12 +3,18 @@ import { describe, expect, it } from "vitest";
 import {
   buildInitialProxyVerificationRows,
   getClaudeConnector,
+  getCodexConnector,
+  getConnectorsNeedingSetup,
   getContactRequestValidationError,
+  getDisabledManagedConnectors,
   getInitialLauncherStage,
   getLauncherAutoConfigureDecision,
+  isAnyManagedConnectorEnabled,
+  isManagedConnectorId,
   isValidEmailAddress,
   nextAutoConfigureStep,
-  nextAutoConfigureStepAfterApply
+  nextAutoConfigureStepAfterApply,
+  proxyVerificationWaitingCopy
 } from "./launcherHelpers";
 import type { ClientConnectorStatus } from "./types";
 
@@ -46,8 +52,41 @@ describe("launcher helpers", () => {
     expect(getClaudeConnector(connectors)).toEqual(connectors[1]);
   });
 
+  it("finds the managed Codex connector from mixed connector lists", () => {
+    const connectors: ClientConnectorStatus[] = [
+      { clientId: "cursor", name: "Cursor", installed: true, enabled: false, verified: false },
+      {
+        clientId: "codex_cli",
+        name: "Codex",
+        installed: true,
+        enabled: true,
+        verified: true
+      }
+    ];
+
+    expect(getCodexConnector(connectors)).toEqual(connectors[1]);
+  });
+
   it("decides whether launcher auto-setup should wait, apply setup, or continue", () => {
     expect(getLauncherAutoConfigureDecision([])).toBe("show_client_setup");
+    expect(
+      getLauncherAutoConfigureDecision([
+        {
+          clientId: "claude_code",
+          name: "Claude Code",
+          installed: false,
+          enabled: false,
+          verified: false
+        },
+        {
+          clientId: "codex_cli",
+          name: "Codex",
+          installed: true,
+          enabled: false,
+          verified: false
+        }
+      ])
+    ).toBe("apply_client_setup");
     expect(
       getLauncherAutoConfigureDecision([
         {
@@ -70,9 +109,72 @@ describe("launcher helpers", () => {
         }
       ])
     ).toBe("begin_proxy_verification");
+    expect(
+      getLauncherAutoConfigureDecision([
+        {
+          clientId: "claude_code",
+          name: "Claude Code",
+          installed: true,
+          enabled: true,
+          verified: false
+        },
+        {
+          clientId: "codex_cli",
+          name: "Codex",
+          installed: true,
+          enabled: false,
+          verified: false
+        }
+      ])
+    ).toBe("apply_client_setup");
   });
 
-  it("builds initial proxy verification rows from enabled installed Claude connectors", () => {
+  it("lists disabled managed connectors for re-enable flows", () => {
+    const connectors: ClientConnectorStatus[] = [
+      {
+        clientId: "claude_code",
+        name: "Claude Code",
+        installed: true,
+        enabled: false,
+        verified: false
+      },
+      {
+        clientId: "codex_cli",
+        name: "Codex",
+        installed: true,
+        enabled: false,
+        verified: false
+      }
+    ];
+
+    expect(getDisabledManagedConnectors(connectors)).toEqual(connectors);
+    expect(isManagedConnectorId("codex_cli")).toBe(true);
+    expect(isManagedConnectorId("cursor")).toBe(false);
+  });
+
+  it("lists installed managed connectors that still need setup", () => {
+    const connectors: ClientConnectorStatus[] = [
+      {
+        clientId: "claude_code",
+        name: "Claude Code",
+        installed: true,
+        enabled: true,
+        verified: false
+      },
+      {
+        clientId: "codex_cli",
+        name: "Codex",
+        installed: true,
+        enabled: false,
+        verified: false
+      }
+    ];
+
+    expect(getConnectorsNeedingSetup(connectors)).toEqual([connectors[1]]);
+    expect(isAnyManagedConnectorEnabled(connectors)).toBe(true);
+  });
+
+  it("builds initial proxy verification rows from enabled installed managed connectors", () => {
     const rows = buildInitialProxyVerificationRows([
       { clientId: "cursor", name: "Cursor", installed: true, enabled: true, verified: false },
       {
@@ -83,8 +185,15 @@ describe("launcher helpers", () => {
         verified: false
       },
       {
-        clientId: "claude_code",
-        name: "Claude Code Beta",
+        clientId: "codex_cli",
+        name: "Codex",
+        installed: true,
+        enabled: true,
+        verified: false
+      },
+      {
+        clientId: "codex_cli",
+        name: "Codex Beta",
         installed: true,
         enabled: false,
         verified: false
@@ -96,7 +205,13 @@ describe("launcher helpers", () => {
         clientId: "claude_code",
         name: "Claude Code",
         state: "processing",
-        message: "Waiting for a Claude Code prompt..."
+        message: proxyVerificationWaitingCopy("claude_code")
+      },
+      {
+        clientId: "codex_cli",
+        name: "Codex",
+        state: "processing",
+        message: proxyVerificationWaitingCopy("codex_cli")
       }
     ]);
   });
@@ -135,28 +250,35 @@ describe("launcher helpers", () => {
       enabled: false,
       verified: false
     };
+    const codex: ClientConnectorStatus = {
+      clientId: "codex_cli",
+      name: "Codex",
+      installed: true,
+      enabled: false,
+      verified: false
+    };
 
     it("routes show_client_setup decisions to manual setup", () => {
-      expect(nextAutoConfigureStep("show_client_setup", claude)).toEqual({
+      expect(nextAutoConfigureStep("show_client_setup", [claude])).toEqual({
         kind: "show_client_setup"
       });
     });
 
-    it("routes apply_client_setup to an apply step using the connector's clientId", () => {
-      expect(nextAutoConfigureStep("apply_client_setup", claude)).toEqual({
+    it("routes apply_client_setup to an apply step using the first connector needing setup", () => {
+      expect(nextAutoConfigureStep("apply_client_setup", [claude, codex])).toEqual({
         kind: "apply",
         clientId: "claude_code"
       });
     });
 
-    it("falls back to manual setup when apply_client_setup has no detected connector", () => {
-      expect(nextAutoConfigureStep("apply_client_setup", null)).toEqual({
+    it("falls back to manual setup when apply_client_setup has no connectors needing setup", () => {
+      expect(nextAutoConfigureStep("apply_client_setup", [])).toEqual({
         kind: "show_client_setup"
       });
     });
 
     it("routes begin_proxy_verification straight to proxy verification", () => {
-      expect(nextAutoConfigureStep("begin_proxy_verification", null)).toEqual({
+      expect(nextAutoConfigureStep("begin_proxy_verification", [])).toEqual({
         kind: "begin_proxy_verification"
       });
     });

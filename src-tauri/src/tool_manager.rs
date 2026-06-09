@@ -589,8 +589,8 @@ impl ToolManager {
                 // Wrap with `nice` so headroom yields CPU to foreground apps
                 // (Claude Code, terminal, etc.) when the machine is contended.
                 // On idle systems headroom still runs at full speed.
-                let mut child = Command::new("/usr/bin/nice")
-                    .arg("-n")
+                let mut cmd = Command::new("/usr/bin/nice");
+                cmd.arg("-n")
                     .arg("5")
                     .arg(executable)
                     .args(args)
@@ -602,7 +602,15 @@ impl ToolManager {
                     .env("PIP_DISABLE_PIP_VERSION_CHECK", "1")
                     .env("PIP_NO_INPUT", "1")
                     .env("HEADROOM_SDK", "headroom-desktop-proxy")
-                    .env("HEADROOM_HTTP2", "false")
+                    .env("HEADROOM_HTTP2", "false");
+                // Linux preview installs headroom-ai from the generic wheel,
+                // which does not ship the native `headroom._core` extension.
+                // Without this the proxy exits during lifespan startup.
+                #[cfg(target_os = "linux")]
+                {
+                    cmd.env("HEADROOM_REQUIRE_RUST_CORE", "false");
+                }
+                let mut child = cmd
                     .stdin(Stdio::null())
                     .stdout(Stdio::from(
                         log_file

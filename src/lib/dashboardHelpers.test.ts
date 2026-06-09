@@ -142,12 +142,14 @@ describe("dashboard helpers", () => {
     const connectors: ClientConnectorStatus[] = [
       { clientId: "zed", name: "Zed", installed: false, enabled: false, verified: false },
       { clientId: "claude_code", name: "Claude Code", installed: true, enabled: true, verified: true },
+      { clientId: "codex_cli", name: "Codex", installed: true, enabled: false, verified: false },
       { clientId: "cursor", name: "Cursor", installed: true, enabled: false, verified: false }
     ];
 
-    expect(aggregateClientConnectors(connectors)).toEqual([connectors[1]]);
+    expect(aggregateClientConnectors(connectors)).toEqual([connectors[1], connectors[2]]);
     expect(sortClientConnectors(connectors).map((connector) => connector.clientId)).toEqual([
       "claude_code",
+      "codex_cli",
       "cursor",
       "zed"
     ]);

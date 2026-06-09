@@ -311,8 +311,14 @@ export function formatLearnStatus(project: {
   return `last scan: ${diffDays} days ago`;
 }
 
+export const MANAGED_CONNECTOR_IDS = ["claude_code", "codex_cli"] as const;
+
+const SUPPORTED_CLIENT_CONNECTOR_IDS = new Set<string>(MANAGED_CONNECTOR_IDS);
+
 export function aggregateClientConnectors(connectors: ClientConnectorStatus[]) {
-  return connectors.filter((connector) => connector.clientId === "claude_code");
+  return connectors.filter((connector) =>
+    SUPPORTED_CLIENT_CONNECTOR_IDS.has(connector.clientId)
+  );
 }
 
 export function sortClientConnectors(connectors: ClientConnectorStatus[]) {

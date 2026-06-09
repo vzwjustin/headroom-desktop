@@ -85,8 +85,13 @@ import {
 import {
   buildInitialProxyVerificationRows,
   getClaudeConnector,
+  getCodexConnector,
+  getConnectorsNeedingSetup,
+  getDisabledManagedConnectors,
   getInitialLauncherStage,
   getLauncherAutoConfigureDecision,
+  isAnyManagedConnectorEnabled,
+  isManagedConnectorId,
   nextAutoConfigureStep,
   nextAutoConfigureStepAfterApply,
   type LauncherStage
@@ -136,20 +141,31 @@ const navItems: NavItem[] = [
 
 const connectorSetupDetails: Record<string, string> = {
   claude_code:
-    "Headroom injects ANTHROPIC_BASE_URL into shell profiles and ~/.claude/settings.json so Claude Code connects through Headroom. Headroom also installs RTK, adds it to your shell PATH, and enables Claude Code auto-rewrite for bash commands."
+    "Headroom injects ANTHROPIC_BASE_URL into shell profiles and ~/.claude/settings.json so Claude Code connects through Headroom. Headroom also installs RTK, adds it to your shell PATH, and enables Claude Code auto-rewrite for bash commands.",
+  codex_cli:
+    "Headroom points Codex at http://127.0.0.1:6767/v1 by updating ~/.codex/config.toml and exporting OPENAI_BASE_URL in your shell profiles."
 };
 
 const connectorSupportWarnings: Record<string, string> = {};
 
 const connectorUnavailableReasons: Record<string, string> = {
   claude_code:
-    "Claude Code was not detected. Install Claude Code and restart Headroom."
+    "Claude Code was not detected. Install Claude Code and restart Headroom.",
+  codex_cli:
+    "Codex was not detected. Install the Codex CLI and restart Headroom."
 };
 
 const launcherConnectorFallback: ClientConnectorStatus[] = [
   {
     clientId: "claude_code",
     name: "Claude Code",
+    installed: false,
+    enabled: false,
+    verified: false
+  },
+  {
+    clientId: "codex_cli",
+    name: "Codex",
     installed: false,
     enabled: false,
     verified: false
@@ -761,12 +777,23 @@ export default function App() {
   }, [connectors]);
 
   useEffect(() => {
-    const claudeConnector = getClaudeConnector(connectors);
-    if (!claudeConnector?.enabled) {
+    const codexConnector = getCodexConnector(connectors);
+    if (!codexConnector?.installed) {
+      return;
+    }
+    trackInstallMilestoneOnce("codex_detected", {
+      enabled: codexConnector.enabled,
+      verified: codexConnector.verified
+    });
+  }, [connectors]);
+
+  useEffect(() => {
+    if (!isAnyManagedConnectorEnabled(connectors)) {
       return;
     }
     trackInstallMilestoneOnce("optimization_enabled", {
-      verified: claudeConnector.verified
+      claude_enabled: getClaudeConnector(connectors)?.enabled ?? false,
+      codex_enabled: getCodexConnector(connectors)?.enabled ?? false
     });
   }, [connectors]);
 
@@ -1562,10 +1589,10 @@ export default function App() {
   ]);
 
   // Keep connectorPhase in sync with the connector enabled state from the backend
-  const claudeConnectorEnabled = getClaudeConnector(connectors)?.enabled;
+  const managedConnectorEnabled = isAnyManagedConnectorEnabled(connectors);
   useEffect(() => {
     setConnectorPhase((prev) => {
-      if (!claudeConnectorEnabled) return "disabled";
+      if (!managedConnectorEnabled) return "disabled";
       // Any transition from "disabled" → enabled (re-enable click, externally
       // toggled, or fresh app launch) drops into verifying, so the polling
       // effect below confirms via /stats that traffic is actually flowing
@@ -1573,7 +1600,7 @@ export default function App() {
       if (prev === "disabled") return "verifying";
       return prev; // keep "verifying" or "healthy"
     });
-  }, [claudeConnectorEnabled]);
+  }, [managedConnectorEnabled]);
 
   // While verifying, poll the proxy's /stats request counter and flip to
   // healthy when it ticks past the anchor we captured on the first reachable
@@ -1742,7 +1769,7 @@ export default function App() {
   }
 
   function canConfigureConnectorWithoutDetection(connector: ClientConnectorStatus) {
-    return connector.installed || connector.clientId === "claude_code";
+    return connector.installed || isManagedConnectorId(connector.clientId);
   }
 
   function getConnectorSupportWarning(connector: ClientConnectorStatus) {
@@ -1753,7 +1780,7 @@ export default function App() {
     if (connector.installed) {
       return null;
     }
-    if (connector.clientId === "claude_code") {
+    if (isManagedConnectorId(connector.clientId)) {
       return connectorUnavailableReasons[connector.clientId];
     }
     return null;
@@ -1922,7 +1949,7 @@ export default function App() {
     }
   }
 
-  async function autoConfigureClaudeCodeForLauncher() {
+  async function autoConfigureClientsForLauncher() {
     setConnectorsBusy(true);
     setConnectorsError(null);
 
@@ -1930,36 +1957,41 @@ export default function App() {
       let latestConnectors = await invoke<ClientConnectorStatus[]>("get_client_connectors");
       applyConnectorsIfChanged(latestConnectors);
 
-      const step = nextAutoConfigureStep(
-        getLauncherAutoConfigureDecision(latestConnectors),
-        getClaudeConnector(latestConnectors)
-      );
-
-      if (step.kind === "show_client_setup") {
-        setLauncherStage("client_setup");
-        return;
-      }
-
-      if (step.kind === "apply") {
-        await invoke<ClientSetupResult>("apply_client_setup", {
-          clientId: step.clientId
-        });
-        latestConnectors = await invoke<ClientConnectorStatus[]>("get_client_connectors");
-        applyConnectorsIfChanged(latestConnectors);
-
-        const postApplyStep = nextAutoConfigureStepAfterApply(
-          getLauncherAutoConfigureDecision(latestConnectors)
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const decision = getLauncherAutoConfigureDecision(latestConnectors);
+        const step = nextAutoConfigureStep(
+          decision,
+          getConnectorsNeedingSetup(latestConnectors)
         );
-        if (postApplyStep.kind !== "begin_proxy_verification") {
+
+        if (step.kind === "show_client_setup") {
           setLauncherStage("client_setup");
           return;
         }
+
+        if (step.kind === "apply") {
+          await invoke<ClientSetupResult>("apply_client_setup", {
+            clientId: step.clientId
+          });
+          latestConnectors = await invoke<ClientConnectorStatus[]>("get_client_connectors");
+          applyConnectorsIfChanged(latestConnectors);
+
+          const postApplyStep = nextAutoConfigureStepAfterApply(
+            getLauncherAutoConfigureDecision(latestConnectors)
+          );
+          if (postApplyStep.kind !== "begin_proxy_verification") {
+            continue;
+          }
+        }
+
+        await beginProxyVerificationStep();
+        return;
       }
 
-      await beginProxyVerificationStep();
+      setLauncherStage("client_setup");
     } catch (error) {
       setConnectorsError(
-        error instanceof Error ? error.message : "Could not configure Claude Code automatically."
+        error instanceof Error ? error.message : "Could not configure coding clients automatically."
       );
       setLauncherStage("client_setup");
     } finally {
@@ -1968,7 +2000,7 @@ export default function App() {
   }
 
   async function handleFirstLaunchContinue() {
-    await autoConfigureClaudeCodeForLauncher();
+    await autoConfigureClientsForLauncher();
   }
 
   async function runHeadroomLearn(projectPath: string) {
@@ -2452,7 +2484,7 @@ export default function App() {
         showSpinner={bootstrapping}
       >
         <h1>
-          Headroom cuts Claude Code costs
+          Headroom cuts coding client costs
           <br />
            ~<span className="headline-highlight">50%</span> by trimming prompt bloat.
         </h1>
@@ -2473,7 +2505,7 @@ export default function App() {
           <article>
             <strong>Less tokens, no impact</strong>
             <p>
-              Smart optimization cuts noise before Claude Code sees it, with
+              Smart optimization cuts noise before your clients see it, with
               no impact on the output.
             </p>
           </article>
@@ -2536,6 +2568,11 @@ export default function App() {
                     <code>~/.claude/hooks/headroom-rtk-rewrite.sh</code> so Claude Code runs through
                     Headroom. A timestamped backup is written before any edit.
                   </li>
+                  <li>
+                    Point Codex at <code>http://127.0.0.1:6767/v1</code> by setting{" "}
+                    <code>openai_base_url</code> in <code>~/.codex/config.toml</code> and exporting{" "}
+                    <code>OPENAI_BASE_URL</code> in your shell profiles when you enable Codex.
+                  </li>
                 </ul>
               </div>
             )}
@@ -2593,8 +2630,8 @@ export default function App() {
         version={appSemver}
       >
         <div className="post-install__lead">
-          <h1>Connect Claude Code</h1>
-          <p>Toggle to automatically configure Claude Code to route through Headroom.</p>
+          <h1>Connect your coding clients</h1>
+          <p>Toggle each client to route Claude Code and Codex through Headroom.</p>
           <div className="connector-list">
             {availableConnectors.map((connector) => {
               const unavailableReason = getConnectorUnavailableReason(connector);
@@ -2683,7 +2720,7 @@ export default function App() {
           </div>
           {unavailableConnectors.length > 0 ? (
             <div className="connector-list connector-list--unavailable">
-              <p className="connector-list__section-label">Claude Code not detected on this machine</p>
+              <p className="connector-list__section-label">Clients not detected on this machine</p>
               {unavailableConnectors.map((connector) => {
                 const unavailableReason = getConnectorUnavailableReason(connector);
                 const supportWarning = getConnectorSupportWarning(connector);
@@ -2773,7 +2810,7 @@ export default function App() {
         <div className="post-install__lead">
           <h1>Test your setup</h1>
           <p>
-            Send a message in Claude Code to verify the connection is working. You may need to restart Claude Code first.
+            Send a message in each enabled client to verify the connection is working. You may need to restart the client first.
           </p>
           {hasEnabledApps ? (
             <div className="connector-list">
@@ -2798,7 +2835,7 @@ export default function App() {
             </div>
           ) : (
             <p className="launcher-restart-hint">
-              Claude Code is not enabled yet. Go back to the previous step to enable it.
+              No clients are enabled yet. Go back to the previous step to enable one.
             </p>
           )}
           {proxyVerificationHint ? (
@@ -2854,7 +2891,7 @@ export default function App() {
           ) : (
             <>
               <p>
-                It will trim prompt bloat whenever you use Claude Code.
+                It will trim prompt bloat whenever you use Claude Code or Codex.
               </p>
               <div className="post-install__metrics">
                 <article className="soft-card stat-card">
@@ -2933,7 +2970,7 @@ export default function App() {
   const platformPreviewNotice =
     runtimeStatus?.supportTier === "experimental"
       ? runtimeStatus.platform === "linux"
-        ? "Linux is currently a preview build. Core proxy routing is supported, but Headroom Learn and secure API key storage are disabled while the platform is hardened."
+        ? "Linux is currently a preview build. Core proxy routing for Claude Code and Codex is supported, but Headroom Learn and secure API key storage are disabled while the platform is hardened."
         : "This platform is currently in preview."
       : null;
   const headroomLearnSupported = runtimeStatus?.headroomLearnSupported !== false;
@@ -2941,7 +2978,7 @@ export default function App() {
     runtimeStatus?.headroomLearnDisabledReason ??
     "Headroom Learn is unavailable on this platform.";
 
-  const claudeConnector = getClaudeConnector(connectors);
+  const disabledManagedConnectors = getDisabledManagedConnectors(connectors);
 
   const calloutBanner = (() => {
     if (!runtimeStatus) {
@@ -2969,13 +3006,13 @@ export default function App() {
       if (connectorPhase === "disabled") {
         return {
           tone: "disabled",
-          title: "Claude is disconnected — Headroom isn't reducing costs."
+          title: "Clients are disconnected — Headroom isn't reducing costs."
         } as const;
       }
       if (connectorPhase === "verifying") {
         return {
           tone: "starting",
-          title: "Send a message in Claude Code to verify the connection is working. You may need to restart Claude Code first."
+          title: "Send a message in Claude Code or Codex to verify the connection is working. You may need to restart the client first."
         } as const;
       }
       return {
@@ -3082,15 +3119,17 @@ export default function App() {
                   <p className="callout-banner__subtitle">{platformPreviewNotice}</p>
                 ) : null}
                 {calloutBanner.tone === "healthy" && dashboard.lifetimeEstimatedTokensSaved < 1_000_000 && (
-                  <p className="callout-banner__subtitle">Now use Claude Code as normal, and check back later to see how much you are saving by using Headroom.</p>
+                  <p className="callout-banner__subtitle">Now use your connected clients as normal, and check back later to see how much you are saving by using Headroom.</p>
                 )}
               </div>
-              {connectorPhase === "disabled" && claudeConnector && (
+              {connectorPhase === "disabled" && disabledManagedConnectors.length > 0 && (
                 <button
                   className="callout-banner__action"
                   disabled={connectorsBusy}
                   onClick={async () => {
-                    await toggleConnector(claudeConnector, true);
+                    for (const connector of disabledManagedConnectors) {
+                      await toggleConnector(connector, true);
+                    }
                     setConnectorPhase("verifying");
                   }}
                   type="button"
@@ -3170,7 +3209,7 @@ export default function App() {
                     </p>
                     <p className="optimize-minimal__meta">
                       Linux preview currently supports the core Headroom proxy,
-                      Claude Code routing, and RTK activity tracking.
+                      Claude Code and Codex routing, and RTK activity tracking.
                     </p>
                   </div>
                 ) : claudeProjectsBusy && claudeProjects.length === 0 ? (
@@ -3379,7 +3418,9 @@ export default function App() {
                     const connectorLabel =
                       connector.clientId === "claude_code"
                         ? "Claude Code connection"
-                        : connector.name;
+                        : connector.clientId === "codex_cli"
+                          ? "Codex connection"
+                          : connector.name;
                     const unavailableReason = getConnectorUnavailableReason(connector);
                     const detectionWarning = getConnectorDetectionWarning(connector);
                     const toggleDisabled =
@@ -3662,7 +3703,8 @@ export default function App() {
                 </div>
                 <p>
                   Reverses every change Headroom made: removes the managed Python runtime, the Claude Code
-                  hook, and restores <code>~/.claude/settings.json</code> changes. Headroom will quit when done.
+                  hook, Codex routing in <code>~/.codex/config.toml</code>, and restores{" "}
+                  <code>~/.claude/settings.json</code> changes. Headroom will quit when done.
                 </p>
                 <button
                   className="secondary-button secondary-button--small"
@@ -3737,6 +3779,7 @@ export default function App() {
                 <ul className="api-key-guide">
                   <li>Strip Headroom's hook and env from <code>~/.claude/settings.json</code> and <code>settings.local.json</code></li>
                   <li>Delete <code>~/.claude/hooks/headroom-rtk-rewrite.sh</code></li>
+                  <li>Remove Headroom routing from <code>~/.codex/config.toml</code> and managed shell blocks</li>
                   <li>Delete <code>~/Library/Application Support/Headroom</code> (logs, caches, setup state)</li>
                   <li>Delete <code>~/.headroom</code> (Python runtime)</li>
                   <li>Remove the LaunchAgent plist from <code>~/Library/LaunchAgents/</code> and disable the login item</li>
