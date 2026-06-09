@@ -147,7 +147,7 @@ pub fn apply_client_setup(client_id: &str) -> Result<ClientSetupResult> {
             let mut updates = configure_codex_cli(&shell_targets)?;
             changed_files.extend(updates.0);
             backup_files.extend(updates.1);
-            if client_id == "codex_gui" {
+            if matches!(client_id, "codex_cli" | "codex_gui") {
                 configure_codex_gui()?;
             }
             state
@@ -880,16 +880,20 @@ fn default_headroom_managed_python_path() -> PathBuf {
         .join("python3")
 }
 
+fn shell_discovery_block_ids(client_id: &str) -> &'static [&'static str] {
+    match normalized_setup_id(client_id) {
+        "codex_cli" => &["codex_cli", "codex"],
+        _ => &["claude_code", "managed_rtk"],
+    }
+}
+
 fn resolve_client_shell_targets(state: &ClientSetupState, client_id: &str) -> Result<Vec<PathBuf>> {
     let state_id = normalized_setup_id(client_id);
     let mut targets = shell_targets_from_state(state.managed_shell_files.get(state_id));
     if targets.is_empty() {
         targets = shell_targets_from_state(state.remembered_shell_files.get(state_id));
     }
-    targets.extend(discover_managed_shell_targets(&[
-        "claude_code",
-        "managed_rtk",
-    ])?);
+    targets.extend(discover_managed_shell_targets(shell_discovery_block_ids(client_id))?);
 
     let default_targets = default_shell_targets_for_family(detect_shell_family());
     if targets.is_empty() {
@@ -3322,6 +3326,25 @@ export ANTHROPIC_BASE_URL=http://127.0.0.1:6767
             "codex_cli still configured, got: {:?}",
             state.configured_clients
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn is_any_managed_client_enabled_tracks_claude_and_codex() {
+        let _home = TestHome::new();
+        assert!(!super::is_any_managed_client_enabled());
+
+        super::apply_client_setup("codex_cli").expect("apply codex");
+        assert!(!super::is_claude_code_enabled());
+        assert!(super::is_codex_enabled());
+        assert!(super::is_any_managed_client_enabled());
+
+        super::disable_client_setup("codex_cli").expect("disable codex");
+        assert!(!super::is_any_managed_client_enabled());
+
+        super::apply_client_setup("claude_code").expect("apply claude");
+        assert!(super::is_claude_code_enabled());
+        assert!(super::is_any_managed_client_enabled());
     }
 
     #[test]

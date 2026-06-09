@@ -81,6 +81,14 @@ export function isAnyManagedConnectorEnabled(connectors: ClientConnectorStatus[]
   return getManagedConnectors(connectors).some((connector) => connector.enabled);
 }
 
+export function getDisabledManagedConnectors(connectors: ClientConnectorStatus[]) {
+  return getManagedConnectors(connectors).filter((connector) => !connector.enabled);
+}
+
+export function isManagedConnectorId(clientId: string) {
+  return clientId === "claude_code" || clientId === "codex_cli";
+}
+
 export function getLauncherAutoConfigureDecision(
   connectors: ClientConnectorStatus[]
 ): LauncherAutoConfigureDecision {

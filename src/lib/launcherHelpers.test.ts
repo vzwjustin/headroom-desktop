@@ -6,9 +6,11 @@ import {
   getCodexConnector,
   getConnectorsNeedingSetup,
   getContactRequestValidationError,
+  getDisabledManagedConnectors,
   getInitialLauncherStage,
   getLauncherAutoConfigureDecision,
   isAnyManagedConnectorEnabled,
+  isManagedConnectorId,
   isValidEmailAddress,
   nextAutoConfigureStep,
   nextAutoConfigureStepAfterApply,
@@ -125,6 +127,29 @@ describe("launcher helpers", () => {
         }
       ])
     ).toBe("apply_client_setup");
+  });
+
+  it("lists disabled managed connectors for re-enable flows", () => {
+    const connectors: ClientConnectorStatus[] = [
+      {
+        clientId: "claude_code",
+        name: "Claude Code",
+        installed: true,
+        enabled: false,
+        verified: false
+      },
+      {
+        clientId: "codex_cli",
+        name: "Codex",
+        installed: true,
+        enabled: false,
+        verified: false
+      }
+    ];
+
+    expect(getDisabledManagedConnectors(connectors)).toEqual(connectors);
+    expect(isManagedConnectorId("codex_cli")).toBe(true);
+    expect(isManagedConnectorId("cursor")).toBe(false);
   });
 
   it("lists installed managed connectors that still need setup", () => {
