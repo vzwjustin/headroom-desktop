@@ -136,20 +136,31 @@ const navItems: NavItem[] = [
 
 const connectorSetupDetails: Record<string, string> = {
   claude_code:
-    "Headroom injects ANTHROPIC_BASE_URL into shell profiles and ~/.claude/settings.json so Claude Code connects through Headroom. Headroom also installs RTK, adds it to your shell PATH, and enables Claude Code auto-rewrite for bash commands."
+    "Headroom injects ANTHROPIC_BASE_URL into shell profiles and ~/.claude/settings.json so Claude Code connects through Headroom. Headroom also installs RTK, adds it to your shell PATH, and enables Claude Code auto-rewrite for bash commands.",
+  codex_cli:
+    "Headroom points Codex at http://127.0.0.1:6767/v1 by updating ~/.codex/config.toml and exporting OPENAI_BASE_URL in your shell profiles."
 };
 
 const connectorSupportWarnings: Record<string, string> = {};
 
 const connectorUnavailableReasons: Record<string, string> = {
   claude_code:
-    "Claude Code was not detected. Install Claude Code and restart Headroom."
+    "Claude Code was not detected. Install Claude Code and restart Headroom.",
+  codex_cli:
+    "Codex was not detected. Install the Codex CLI and restart Headroom."
 };
 
 const launcherConnectorFallback: ClientConnectorStatus[] = [
   {
     clientId: "claude_code",
     name: "Claude Code",
+    installed: false,
+    enabled: false,
+    verified: false
+  },
+  {
+    clientId: "codex_cli",
+    name: "Codex",
     installed: false,
     enabled: false,
     verified: false
@@ -1742,7 +1753,11 @@ export default function App() {
   }
 
   function canConfigureConnectorWithoutDetection(connector: ClientConnectorStatus) {
-    return connector.installed || connector.clientId === "claude_code";
+    return (
+      connector.installed ||
+      connector.clientId === "claude_code" ||
+      connector.clientId === "codex_cli"
+    );
   }
 
   function getConnectorSupportWarning(connector: ClientConnectorStatus) {
@@ -1753,7 +1768,7 @@ export default function App() {
     if (connector.installed) {
       return null;
     }
-    if (connector.clientId === "claude_code") {
+    if (connector.clientId === "claude_code" || connector.clientId === "codex_cli") {
       return connectorUnavailableReasons[connector.clientId];
     }
     return null;
@@ -3379,7 +3394,9 @@ export default function App() {
                     const connectorLabel =
                       connector.clientId === "claude_code"
                         ? "Claude Code connection"
-                        : connector.name;
+                        : connector.clientId === "codex_cli"
+                          ? "Codex connection"
+                          : connector.name;
                     const unavailableReason = getConnectorUnavailableReason(connector);
                     const detectionWarning = getConnectorDetectionWarning(connector);
                     const toggleDisabled =

@@ -2125,9 +2125,7 @@ fn apply_client_setup(app: AppHandle, client_id: String) -> Result<ClientSetupRe
         }
         Err(err) => {
             let msg = err.to_string();
-            if !msg.starts_with("Automatic setup is not supported yet")
-                && !msg.starts_with("Codex integration has been disabled")
-            {
+            if !msg.starts_with("Automatic setup is not supported yet") {
                 sentry::capture_message(
                     &format!("client setup failed for {client_id}: {err:#}"),
                     sentry::Level::Error,
