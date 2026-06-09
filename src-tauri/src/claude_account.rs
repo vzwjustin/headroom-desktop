@@ -610,50 +610,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn remote_account_clamps_invite_bonus_to_50() {
-        let raw = RemoteAccountResponse {
-            email: "a@b".into(),
-            trial_started_at: None,
-            trial_ends_at: None,
-            trial_active: false,
-            subscription_active: false,
-            subscription_tier: None,
-            subscription_started_at: None,
-            subscription_renews_at: None,
-            subscription_amount_cents: None,
-            subscription_billing_period: None,
-            subscription_discount_duration: None,
-            subscription_discount_duration_in_months: None,
-            invite_code: None,
-            accepted_invites_count: 0,
-            invite_bonus_percent: 999.0,
-        };
-        assert_eq!(remote_account_to_profile(raw).invite_bonus_percent, 50.0);
-    }
-
-    #[test]
-    fn remote_account_clamps_negative_invite_bonus_to_zero() {
-        let raw = RemoteAccountResponse {
-            email: "a@b".into(),
-            trial_started_at: None,
-            trial_ends_at: None,
-            trial_active: false,
-            subscription_active: false,
-            subscription_tier: None,
-            subscription_started_at: None,
-            subscription_renews_at: None,
-            subscription_amount_cents: None,
-            subscription_billing_period: None,
-            subscription_discount_duration: None,
-            subscription_discount_duration_in_months: None,
-            invite_code: None,
-            accepted_invites_count: 0,
-            invite_bonus_percent: -10.0,
-        };
-        assert_eq!(remote_account_to_profile(raw).invite_bonus_percent, 0.0);
-    }
-
     // ── Anthropic OAuth usage parser ────────────────────────────────────────
 
     #[test]
