@@ -588,28 +588,6 @@ pub enum ClaudePlanTier {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HeadroomSubscriptionTier {
-    Pro,
-    Max5x,
-    Max20x,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum BillingPeriod {
-    Annual,
-    Monthly,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PricingGateReason {
-    SignInRequired,
-    WeeklyUsageLimitReached,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeAccountProfile {
     pub auth_method: ClaudeAuthMethod,
@@ -633,55 +611,4 @@ pub struct ClaudeAccountProfile {
     pub five_hour_utilization_pct: Option<f64>,
     pub extra_usage_monthly_limit: Option<f64>,
     pub profile_fetch_error: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HeadroomAccountProfile {
-    pub email: String,
-    pub trial_started_at: Option<DateTime<Utc>>,
-    pub trial_ends_at: Option<DateTime<Utc>>,
-    pub trial_active: bool,
-    pub subscription_active: bool,
-    pub subscription_tier: Option<HeadroomSubscriptionTier>,
-    pub subscription_started_at: Option<DateTime<Utc>>,
-    pub subscription_renews_at: Option<DateTime<Utc>>,
-    pub subscription_amount_cents: Option<i64>,
-    pub subscription_billing_period: Option<String>,
-    pub subscription_discount_duration: Option<String>,
-    pub subscription_discount_duration_in_months: Option<i64>,
-    pub invite_code: Option<String>,
-    pub accepted_invites_count: usize,
-    pub invite_bonus_percent: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HeadroomPricingStatus {
-    pub authenticated: bool,
-    pub local_grace_started_at: DateTime<Utc>,
-    pub local_grace_ends_at: DateTime<Utc>,
-    pub local_grace_active: bool,
-    pub account_sync_error: Option<String>,
-    pub needs_authentication: bool,
-    pub optimization_allowed: bool,
-    pub should_nudge: bool,
-    pub nudge_level: u8,
-    pub gate_reason: Option<PricingGateReason>,
-    pub gate_message: String,
-    pub nudge_threshold_percent: Option<f64>,
-    pub effective_nudge_thresholds_percent: Option<Vec<f64>>,
-    pub disable_threshold_percent: Option<f64>,
-    pub effective_disable_threshold_percent: Option<f64>,
-    pub recommended_subscription_tier: Option<HeadroomSubscriptionTier>,
-    pub claude: ClaudeAccountProfile,
-    pub account: Option<HeadroomAccountProfile>,
-    pub launch_discount_active: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HeadroomAuthCodeRequest {
-    pub email: String,
-    pub expires_in_seconds: u64,
 }

@@ -16,10 +16,10 @@ const emptySnapshot: ActivityFeedResponse = {
 };
 
 describe("notificationActionView", () => {
-  it("routes auth-related actions to upgradeAuth", () => {
-    expect(notificationActionView("signin")).toBe("upgradeAuth");
-    expect(notificationActionView("signup")).toBe("upgradeAuth");
-    expect(notificationActionView("billing")).toBe("upgradeAuth");
+  it("routes auth-related actions to settings in open-source builds", () => {
+    expect(notificationActionView("signin")).toBe("settings");
+    expect(notificationActionView("signup")).toBe("settings");
+    expect(notificationActionView("billing")).toBe("settings");
   });
 
   it("routes runtime/connectors actions to settings", () => {

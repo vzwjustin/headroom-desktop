@@ -8,8 +8,6 @@ export type TrayView =
   | "optimization"
   | "health"
   | "notifications"
-  | "upgrade"
-  | "upgradeAuth"
   | "settings";
 
 /// Map a notification's `action` payload to the tray view that should open
@@ -20,7 +18,7 @@ export function notificationActionView(action: string | null): TrayView | null {
     case "signin":
     case "billing":
     case "signup":
-      return "upgradeAuth";
+      return "settings";
     case "runtime":
     case "connectors":
       return "settings";

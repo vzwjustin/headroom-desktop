@@ -383,12 +383,6 @@ export type ClaudeAuthMethod = "claude_ai_oauth" | "api_key" | "unknown";
 
 export type ClaudePlanTier = "free" | "pro" | "max5x" | "max20x" | "unknown";
 
-export type HeadroomSubscriptionTier = "pro" | "max5x" | "max20x";
-
-export type BillingPeriod = "annual" | "monthly";
-
-export type PricingGateReason = "sign_in_required" | "weekly_usage_limit_reached";
-
 export interface ClaudeAccountProfile {
   authMethod: ClaudeAuthMethod;
   email?: string | null;
@@ -405,49 +399,4 @@ export interface ClaudeAccountProfile {
   fiveHourUtilizationPct?: number | null;
   extraUsageMonthlyLimit?: number | null;
   profileFetchError?: string | null;
-}
-
-export interface HeadroomAccountProfile {
-  email: string;
-  trialStartedAt?: string | null;
-  trialEndsAt?: string | null;
-  trialActive: boolean;
-  subscriptionActive: boolean;
-  subscriptionTier?: HeadroomSubscriptionTier | null;
-  subscriptionStartedAt?: string | null;
-  subscriptionRenewsAt?: string | null;
-  subscriptionAmountCents?: number | null;
-  subscriptionBillingPeriod?: string | null;
-  subscriptionDiscountDuration?: string | null;
-  subscriptionDiscountDurationInMonths?: number | null;
-  inviteCode?: string | null;
-  acceptedInvitesCount: number;
-  inviteBonusPercent: number;
-}
-
-export interface HeadroomPricingStatus {
-  authenticated: boolean;
-  localGraceStartedAt: string;
-  localGraceEndsAt: string;
-  localGraceActive: boolean;
-  accountSyncError?: string | null;
-  needsAuthentication: boolean;
-  optimizationAllowed: boolean;
-  shouldNudge: boolean;
-  nudgeLevel: number;
-  gateReason?: PricingGateReason | null;
-  gateMessage: string;
-  nudgeThresholdPercent?: number | null;
-  effectiveNudgeThresholdsPercent?: number[] | null;
-  disableThresholdPercent?: number | null;
-  effectiveDisableThresholdPercent?: number | null;
-  recommendedSubscriptionTier?: HeadroomSubscriptionTier | null;
-  claude: ClaudeAccountProfile;
-  account?: HeadroomAccountProfile | null;
-  launchDiscountActive: boolean;
-}
-
-export interface HeadroomAuthCodeRequest {
-  email: string;
-  expiresInSeconds: number;
 }

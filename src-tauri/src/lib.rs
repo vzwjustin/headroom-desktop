@@ -11,7 +11,7 @@ mod logging;
 mod memory_scrubber;
 mod models;
 mod port_conflict;
-mod pricing;
+mod claude_account;
 mod proxy_intercept;
 mod research;
 mod state;
@@ -40,10 +40,10 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::models::{
-    ActivityFeedResponse, BillingPeriod, BootstrapProgress, ClaudeAccountProfile,
+    ActivityFeedResponse, BootstrapProgress, ClaudeAccountProfile,
     ClaudeCodeProject, ClaudeUsage, ClientConnectorStatus, ClientSetupResult,
-    ClientSetupVerification, DashboardState, HeadroomAuthCodeRequest, HeadroomLearnPrereqStatus,
-    HeadroomLearnStatus, HeadroomPricingStatus, HeadroomSubscriptionTier, ResearchCandidate,
+    ClientSetupVerification, DashboardState, HeadroomLearnPrereqStatus, HeadroomLearnStatus,
+    ResearchCandidate,
     RuntimeStatus, RuntimeUpgradeProgress, TransformationFeedResponse,
 };
 use crate::state::AppState;
@@ -205,7 +205,6 @@ async fn get_dashboard_state(app: AppHandle) -> Result<DashboardState, String> {
                     "launch_experience": state.launch_experience_label()
                 })),
             );
-            pricing::report_milestone(*milestone_tokens_saved);
         }
 
         check_zero_spend_anomaly(&dashboard);
@@ -1498,100 +1497,12 @@ fn get_claude_code_projects(state: State<'_, AppState>) -> Result<Vec<ClaudeCode
 
 #[tauri::command]
 fn get_claude_usage(state: State<'_, AppState>) -> Result<ClaudeUsage, String> {
-    pricing::fetch_claude_usage(&state)
+    claude_account::fetch_claude_usage(&state)
 }
 
 #[tauri::command]
 fn get_claude_profile(state: State<'_, AppState>) -> ClaudeAccountProfile {
-    pricing::detect_claude_profile(&state)
-}
-
-#[tauri::command]
-fn get_headroom_pricing_status(
-    state: State<'_, AppState>,
-) -> Result<HeadroomPricingStatus, String> {
-    let status = pricing::get_pricing_status(&state)?;
-    // Reconcile the runtime with the freshly evaluated status. Bridges the
-    // gap between "user just upgraded" (subscription_active flips on) and
-    // "Headroom optimization actually resumes" — without this, the pricing
-    // gate's bypass flag would stay set and Python would stay down until
-    // the next app launch.
-    state.apply_pricing_gate_status(&status);
-    Ok(status)
-}
-
-#[tauri::command]
-fn request_headroom_auth_code(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    email: String,
-) -> Result<HeadroomAuthCodeRequest, String> {
-    let request = pricing::request_auth_code(&state, &email)?;
-    analytics::track_event(&app, "auth_code_requested", None);
-    Ok(request)
-}
-
-#[tauri::command]
-fn verify_headroom_auth_code(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    email: String,
-    code: String,
-    invite_code: Option<String>,
-) -> Result<HeadroomPricingStatus, String> {
-    let used_invite_code = invite_code
-        .as_ref()
-        .is_some_and(|value| !value.trim().is_empty());
-    let status = pricing::verify_auth_code(&state, &email, &code, invite_code.as_deref())?;
-    // Reconcile the runtime with the freshly evaluated status. Mirrors
-    // `get_headroom_pricing_status` so a user who signs up after grace
-    // expiry doesn't have to wait for the next 60s pricing poll for
-    // Python to come back online.
-    state.apply_pricing_gate_status(&status);
-    analytics::track_event(
-        &app,
-        "auth_verified",
-        Some(json!({ "invite_code_used": used_invite_code })),
-    );
-    Ok(status)
-}
-
-#[tauri::command]
-fn sign_out_headroom_account() -> Result<(), String> {
-    pricing::sign_out()
-}
-
-#[tauri::command]
-fn activate_headroom_account(
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<HeadroomPricingStatus, String> {
-    let lifetime_tokens_saved = state.dashboard().lifetime_estimated_tokens_saved;
-    let status = pricing::activate_account(&state, lifetime_tokens_saved)?;
-    analytics::track_event(&app, "account_activated", None);
-    Ok(status)
-}
-
-#[tauri::command]
-fn create_headroom_checkout_session(
-    app: AppHandle,
-    subscription_tier: HeadroomSubscriptionTier,
-    billing_period: BillingPeriod,
-) -> Result<String, String> {
-    let url = pricing::create_checkout_session(subscription_tier.clone(), billing_period)?;
-    analytics::track_event(
-        &app,
-        "checkout_started",
-        Some(json!({
-            "subscription_tier": subscription_tier_label(&subscription_tier)
-        })),
-    );
-    Ok(url)
-}
-
-#[tauri::command]
-fn get_headroom_billing_portal_url() -> Result<String, String> {
-    pricing::get_billing_portal_url()
+    claude_account::detect_claude_profile(&state)
 }
 
 #[tauri::command]
@@ -2449,47 +2360,9 @@ pub fn run() {
                     "autostart_launch": launched_from_autostart
                 })),
             );
-            // Wire up the bearer-triggered identity-pusher worker. The
-            // intercept thread sends a signal here every time it captures a
-            // bearer whose value differs from what was previously in the
-            // slot; the worker calls `pricing::warm_and_push_identity`,
-            // which warms the OAuth profile cache and posts the populated
-            // IdentityPayload to `desktop/grace/start`. Throttled to one
-            // OAuth fetch per 24 h once the identity is complete.
-            //
-            // Each iteration is wrapped in `catch_unwind` so a panic inside
-            // the HTTP / parsing stack doesn't silently kill the worker
-            // thread (which would leave bearer signals piling up in the
-            // channel forever). On panic we log + report and resume the
-            // recv loop on the next signal.
-            let (fresh_bearer_tx, fresh_bearer_rx) = std::sync::mpsc::channel::<()>();
-            let app_handle_for_pusher = app.handle().clone();
-            std::thread::Builder::new()
-                .name("identity-pusher".into())
-                .spawn(move || {
-                    while fresh_bearer_rx.recv().is_ok() {
-                        // Coalesce: drain any signals that piled up while
-                        // we were processing the previous one.
-                        while fresh_bearer_rx.try_recv().is_ok() {}
-                        let app_handle = app_handle_for_pusher.clone();
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                            move || {
-                                let state: tauri::State<'_, AppState> = app_handle.state();
-                                pricing::warm_and_push_identity(&state);
-                            },
-                        ));
-                        if result.is_err() {
-                            log::error!(
-                                "identity-pusher worker panicked during warm_and_push_identity"
-                            );
-                            sentry::capture_message(
-                                "identity-pusher worker panicked",
-                                sentry::Level::Error,
-                            );
-                        }
-                    }
-                })
-                .expect("spawn identity pusher");
+            // Bearer-change notifications from the intercept layer are ignored
+            // in the open-source build (no account sync to headroom-web).
+            let (fresh_bearer_tx, _fresh_bearer_rx) = std::sync::mpsc::channel::<()>();
 
             // Start the intercept layer before anything else touches port 6767.
             proxy_intercept::spawn(
@@ -2517,47 +2390,14 @@ pub fn run() {
                 client_adapters::restore_client_setups();
             });
 
-            // headroom:// deep link — Polar's checkout success page redirects
-            // here. Triggers an immediate pricing refresh so the gate releases
-            // within seconds of payment instead of waiting for the 5s poll.
             use tauri_plugin_deep_link::DeepLinkExt;
             let deep_link_app = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
-                // NOTE: never call `eprintln!`/`println!` here. When macOS
-                // launches the app fresh via a URL scheme, stderr is not
-                // connected to a valid fd and any stdio write panics with
-                // EIO. Use `log::*` (panic-safe file logger) instead.
-                //
-                // This callback is invoked synchronously from tao's
-                // `application:openURLs:` handler, which is `extern "C"` —
-                // any panic that escapes here aborts the whole process via
-                // `panic_cannot_unwind`. Wrap the body in `catch_unwind` so
-                // an internal failure degrades gracefully instead.
                 let deep_link_app = deep_link_app.clone();
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     for url in event.urls() {
                         if url.scheme() == "headroom" {
-                            let app_handle = deep_link_app.clone();
-                            let _ = show_launcher_window(&app_handle);
-                            // Run the reconciliation on a worker thread — the
-                            // deep-link callback is on the main thread and we
-                            // don't want pricing's blocking HTTP call there.
-                            std::thread::spawn(move || {
-                                let state: tauri::State<'_, AppState> = app_handle.state();
-                                match pricing::get_pricing_status(&state) {
-                                    Ok(status) => {
-                                        state.apply_pricing_gate_status(&status);
-                                        let _ = app_handle.emit("pricing-refreshed", &status);
-                                    }
-                                    Err(err) => {
-                                        sentry::capture_message(
-                                            &format!("deep link pricing refresh failed: {err}"),
-                                            sentry::Level::Warning,
-                                        );
-                                    }
-                                }
-                            });
-                            // Only handle the first headroom:// URL in the batch.
+                            let _ = show_launcher_window(&deep_link_app);
                             break;
                         }
                     }
@@ -2598,13 +2438,6 @@ pub fn run() {
             get_claude_code_projects,
             get_claude_usage,
             get_claude_profile,
-            get_headroom_pricing_status,
-            request_headroom_auth_code,
-            verify_headroom_auth_code,
-            sign_out_headroom_account,
-            activate_headroom_account,
-            create_headroom_checkout_session,
-            get_headroom_billing_portal_url,
             get_activity_feed,
             list_live_learnings,
             list_live_learnings_for_projects,
@@ -2651,14 +2484,6 @@ pub fn run() {
                 state.stop_headroom();
             }
         });
-}
-
-fn subscription_tier_label(tier: &HeadroomSubscriptionTier) -> &'static str {
-    match tier {
-        HeadroomSubscriptionTier::Pro => "pro",
-        HeadroomSubscriptionTier::Max5x => "max5x",
-        HeadroomSubscriptionTier::Max20x => "max20x",
-    }
 }
 
 fn lifetime_token_milestone_kind(milestone_tokens_saved: u64) -> &'static str {

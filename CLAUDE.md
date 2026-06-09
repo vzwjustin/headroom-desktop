@@ -108,7 +108,7 @@
 *~2,000 tokens/session saved*
 - Main Rust entry: `src-tauri/src/lib.rs` (Tauri commands, setup, tray)
 - App state struct: `src-tauri/src/state.rs`
-- Pricing/auth logic: `src-tauri/src/pricing.rs`
+- Claude account/profile detection: `src-tauri/src/claude_account.rs`
 - Keychain access: `src-tauri/src/keychain.rs`
 - Python/tool bootstrap: `src-tauri/src/tool_manager.rs`
 - Frontend: `src/App.tsx`, `src/styles.css`, `src/lib/types.ts`

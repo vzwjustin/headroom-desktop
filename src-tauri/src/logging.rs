@@ -225,7 +225,7 @@ mod tests {
     #[test]
     fn keeps_other_targets() {
         assert!(!skip_sentry(
-            "headroom_desktop_lib::pricing",
+            "headroom_desktop_lib::claude_account",
             "error sending request: timeout"
         ));
         assert!(!skip_sentry("reqwest", "error sending request"));

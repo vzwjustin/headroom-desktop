@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -26,7 +26,7 @@ use crate::models::{
     RuntimeUpgradeFailure, RuntimeUpgradeProgress, TransformationFeedEvent, UpgradeFailurePhase,
     UsageEvent,
 };
-use crate::pricing;
+use crate::claude_account;
 use crate::storage::{app_data_dir, config_file, ensure_data_dirs, telemetry_file};
 use crate::tool_manager::{
     BootstrapStepUpdate, HeadroomRelease, ManagedRuntime, RtkGainSummary, RuntimeMaintenanceKind,
@@ -436,18 +436,9 @@ pub struct AppState {
     /// Wrapped in Arc so the proxy_intercept task can share it without going through AppState.
     pub claude_bearer_token: Arc<Mutex<Option<BearerToken>>>,
     /// When true, the Rust intercept on :6767 forwards traffic directly to
-    /// api.anthropic.com instead of the Python proxy on :6768. Flipped on by
-    /// `enforce_pricing_gate` once a Pro/Max user crosses the disable threshold
-    /// without a Headroom subscription, so existing CC sessions stay alive
-    /// while optimization is genuinely off.
+    /// api.anthropic.com instead of the Python proxy on :6768. Used by debug
+    /// tooling and the runtime pause/recovery paths.
     pub proxy_bypass: Arc<AtomicBool>,
-    /// Number of consecutive `apply_pricing_gate_status` calls that reported
-    /// `optimization_allowed=false` while bypass was off. Acts as a debounce:
-    /// the ungated→gated transition only fires once this hits
-    /// `PRICING_GATE_DEBOUNCE_POLLS`. Reset to 0 on any ungated poll. Prevents
-    /// a single bad pricing read (network blip, brief utilization spike) from
-    /// flipping the gate off and back on within minutes.
-    pricing_gate_violation_streak: Arc<AtomicU32>,
     launch_profile: Mutex<LaunchProfile>,
     launch_profile_path: std::path::PathBuf,
     last_known_good_plan: Mutex<Option<LastKnownGoodPlan>>,
@@ -460,18 +451,6 @@ pub struct AppState {
     cached_rtk_gain_summary: Mutex<Option<(Option<RtkGainSummary>, Instant)>>,
     cached_rtk_today_stats: Mutex<Option<(Option<crate::models::RtkTodayStats>, Instant)>>,
     cached_claude_profile: Mutex<Option<(Option<String>, ClaudeAccountProfile, Instant)>>,
-    /// Last `IdentityFingerprint` we successfully posted to
-    /// `desktop/grace/start`. Used by the bearer-triggered identity-pusher
-    /// worker to skip redundant posts when the same Claude account/plan is
-    /// already on file with headroom-web.
-    last_pushed_identity_fingerprint: Mutex<Option<crate::pricing::IdentityFingerprint>>,
-    /// When we most recently completed a fresh OAuth profile fetch that
-    /// returned a *complete* identity (UUID + email + non-Unknown plan
-    /// tier). The identity-pusher worker uses this to throttle further
-    /// `/api/oauth/profile` calls to ~once per 24 h once we already know
-    /// who the user is. `Instant`, so it resets on app restart — first
-    /// post-restart bearer always triggers a fresh fetch.
-    last_complete_identity_fetch_at: Mutex<Option<Instant>>,
     /// Cached stdout of `headroom memory export`. Shared by every OptimizePanel
     /// that mounts at once — without it, N panels = N Python cold-starts.
     cached_memory_export: Mutex<Option<(String, Instant)>>,
@@ -552,7 +531,6 @@ impl AppState {
             }),
             claude_bearer_token: Arc::new(Mutex::new(None)),
             proxy_bypass: Arc::new(AtomicBool::new(false)),
-            pricing_gate_violation_streak: Arc::new(AtomicU32::new(0)),
             headroom_learn_state: Mutex::new(HeadroomLearnRuntimeState {
                 running: false,
                 project_path: None,
@@ -575,8 +553,6 @@ impl AppState {
             cached_rtk_gain_summary: Mutex::new(None),
             cached_rtk_today_stats: Mutex::new(None),
             cached_claude_profile: Mutex::new(None),
-            last_pushed_identity_fingerprint: Mutex::new(None),
-            last_complete_identity_fetch_at: Mutex::new(None),
             cached_memory_export: Mutex::new(None),
             cached_claude_code_projects: Mutex::new(None),
             cached_headroom_learn_prereq: Mutex::new(None),
@@ -599,8 +575,6 @@ impl AppState {
         }
 
         self.set_runtime_starting(true);
-        self.enforce_pricing_gate();
-        self.stop_python_if_gated();
 
         if let Err(err) = ensure_rtk_integrations(
             &self.tool_manager.rtk_entrypoint(),
@@ -974,7 +948,7 @@ impl AppState {
             tracked_child: self.headroom_process.lock().is_some(),
             python_installed: self.tool_manager.python_runtime_installed(),
             proxy_bypass: self.proxy_bypass.load(std::sync::atomic::Ordering::Acquire),
-            pricing_allows_optimization: self.pricing_allows_optimization(),
+            pricing_allows_optimization: true,
             runtime_paused: self.runtime_is_paused(),
             proxy_reachable: is_headroom_proxy_reachable(),
             ensure_error: ensure_err,
@@ -1081,7 +1055,6 @@ impl AppState {
             let gate_wants_python_down = self
                 .proxy_bypass
                 .load(std::sync::atomic::Ordering::Acquire)
-                || !self.pricing_allows_optimization()
                 || self.runtime_is_paused();
             if gate_wants_python_down {
                 log::info!(
@@ -1667,63 +1640,15 @@ impl AppState {
             }
         }
 
-        let profile = pricing::detect_claude_profile_uncached(self);
-        if pricing::is_identity_complete(&profile) {
-            self.record_complete_identity_fetch();
-        }
+        let profile = claude_account::detect_claude_profile_uncached(self);
         let mut cache = self.cached_claude_profile.lock();
         *cache = Some((current_token, profile.clone(), Instant::now()));
         profile
     }
 
-    /// True iff a `desktop/grace/start` post with this exact set of Claude
-    /// fields has already been recorded as successful in this session.
-    /// Identity-pusher worker uses this to skip repeat posts when the bearer
-    /// rotates but the underlying account/plan has not changed.
-    pub fn identity_fingerprint_already_pushed(
-        &self,
-        fp: &crate::pricing::IdentityFingerprint,
-    ) -> bool {
-        self.last_pushed_identity_fingerprint
-            .lock()
-            .as_ref()
-            .map(|prev| prev == fp)
-            .unwrap_or(false)
-    }
-
-    /// Mark the given fingerprint as the most recent one we've pushed to
-    /// `desktop/grace/start`. Called by the worker after a successful post,
-    /// and by the sign-in / activation paths that send the same payload.
-    pub fn record_pushed_identity_fingerprint(
-        &self,
-        fp: crate::pricing::IdentityFingerprint,
-    ) {
-        *self.last_pushed_identity_fingerprint.lock() = Some(fp);
-    }
-
-    /// True iff a fresh OAuth profile fetch returned a *complete* identity
-    /// (UUID + email + non-Unknown plan tier) within `max_age`. The
-    /// identity-pusher worker uses this to throttle further OAuth calls.
-    pub fn complete_identity_fetched_within(&self, max_age: Duration) -> bool {
-        self.last_complete_identity_fetch_at
-            .lock()
-            .as_ref()
-            .map(|at| at.elapsed() < max_age)
-            .unwrap_or(false)
-    }
-
-    /// Record that we just successfully fetched a complete OAuth identity.
-    /// Called from `cached_claude_profile()` whenever a fresh fetch returns
-    /// a fully populated profile, so every code path that re-warms the
-    /// profile cache contributes to the throttle window.
-    fn record_complete_identity_fetch(&self) {
-        *self.last_complete_identity_fetch_at.lock() = Some(Instant::now());
-    }
-
     /// The most recent classifier output that was something other than
-    /// `Unknown`. Used by the pricing gate to keep applying real thresholds
-    /// when a transient OAuth-profile fetch returns sparse fields and the
-    /// live classifier returns Unknown.
+    /// `Unknown`. Used when a transient OAuth-profile fetch returns sparse
+    /// fields and the live classifier returns Unknown.
     pub fn last_known_good_plan_tier(&self) -> Option<crate::models::ClaudePlanTier> {
         self.last_known_good_plan
             .lock()
@@ -2357,22 +2282,11 @@ impl AppState {
         let in_upgrade_validation = *self.runtime_upgrade_in_progress.lock();
 
         if !in_upgrade_validation {
-            // When the pricing gate has flipped on `proxy_bypass`, Python is
-            // intentionally down — the Rust intercept is routing direct to
-            // Anthropic. Don't restart Python here; that would just defeat the
-            // gate and (via the watchdog's failure path) eventually auto-pause
-            // the runtime.
             if self
                 .proxy_bypass
                 .load(std::sync::atomic::Ordering::Acquire)
             {
                 log::debug!("ensure_headroom_running: short-circuit (proxy_bypass active)");
-                return Ok(());
-            }
-
-            if !self.pricing_allows_optimization() {
-                self.enforce_pricing_gate();
-                self.stop_python_if_gated();
                 return Ok(());
             }
 
@@ -2408,10 +2322,6 @@ impl AppState {
         // because the upgrade could have completed between the two reads
         // (lifecycle_lock can block for the duration of another spawn).
         if !*self.runtime_upgrade_in_progress.lock() {
-            if !self.pricing_allows_optimization() {
-                self.enforce_pricing_gate();
-                return Ok(());
-            }
             if self.runtime_is_paused() {
                 return Ok(());
             }
@@ -2627,115 +2537,7 @@ impl AppState {
         }
     }
 
-    fn pricing_allows_optimization(&self) -> bool {
-        pricing::get_pricing_status(self)
-            .map(|status| status.optimization_allowed)
-            .unwrap_or(true)
-    }
-
-    /// Flip the bypass flag based on current pricing. Safe to call while
-    /// holding `lifecycle_lock` — this never tries to acquire it. Stopping
-    /// the Python proxy is `stop_python_if_gated`'s job (it does take the
-    /// lock) and must be invoked separately.
-    ///
-    /// Does NOT touch `client-setup.json`, `~/.claude/settings.json`, or
-    /// shell blocks. Those are durable user setup, not runtime state — the
-    /// bypass flag alone is enough to make the Rust intercept pass traffic
-    /// straight through to api.anthropic.com while Python is down.
-    fn enforce_pricing_gate(&self) {
-        match pricing::get_pricing_status(self) {
-            Ok(status) if !status.optimization_allowed => {
-                self.proxy_bypass
-                    .store(true, std::sync::atomic::Ordering::Release);
-            }
-            Ok(_) => {
-                self.proxy_bypass
-                    .store(false, std::sync::atomic::Ordering::Release);
-            }
-            Err(_) => {}
-        }
-    }
-
-    /// Stop the Python proxy when pricing currently disallows optimization.
-    /// Acquires `lifecycle_lock`, so callers MUST NOT already hold it.
-    fn stop_python_if_gated(&self) {
-        if !self.pricing_allows_optimization() {
-            self.stop_headroom();
-        }
-    }
-
-    /// Reconcile the runtime against a freshly evaluated pricing status.
-    /// Detects gated→ungated and ungated→gated transitions and runs the
-    /// matching side-effects (start/stop the Python proxy, flip the bypass
-    /// flag). Idempotent on no-op cases — safe to call from every pricing
-    /// poll.
-    ///
-    /// The ungated→gated transition is debounced: the bypass flip only
-    /// fires once `optimization_allowed=false` has been observed for
-    /// `PRICING_GATE_DEBOUNCE_POLLS` consecutive polls. The gated→ungated
-    /// direction has no debounce — recovery should be immediate.
-    ///
-    /// Acquires `lifecycle_lock` (via `stop_headroom` / `ensure_headroom_running`),
-    /// so callers MUST NOT already hold it.
-    pub fn apply_pricing_gate_status(&self, status: &crate::models::HeadroomPricingStatus) {
-        let was_bypassed = self
-            .proxy_bypass
-            .load(std::sync::atomic::Ordering::Acquire);
-        let should_bypass = !status.optimization_allowed;
-
-        if should_bypass {
-            // Once bypassed, the streak is moot — keep it pinned at the
-            // threshold so a future gated→ungated→gated re-flip still
-            // requires a full debounce window.
-            if was_bypassed {
-                return;
-            }
-            let prev = self
-                .pricing_gate_violation_streak
-                .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-            let streak = prev.saturating_add(1);
-            if streak < PRICING_GATE_DEBOUNCE_POLLS {
-                log::info!(
-                    "pricing_gate: gated reading {streak}/{PRICING_GATE_DEBOUNCE_POLLS} — debouncing before bypass flip"
-                );
-                return;
-            }
-            // Transition: ungated → gated. Flip bypass FIRST so the Rust
-            // intercept passes new requests straight through to Anthropic
-            // while we're tearing Python down — otherwise there's a window
-            // where 6767 → 6768 connect fails and Claude Code sees 502.
-            self.proxy_bypass
-                .store(true, std::sync::atomic::Ordering::Release);
-            self.stop_headroom();
-        } else {
-            // Any ungated reading clears the violation streak so a later
-            // gated reading starts the debounce window over.
-            self.pricing_gate_violation_streak
-                .store(0, std::sync::atomic::Ordering::Release);
-            if was_bypassed {
-                // Transition: gated → ungated (e.g., user just upgraded or
-                // weekly usage rolled over). Clear bypass and bring Python
-                // back online. No client_setups restore needed — gating
-                // never tore them down.
-                self.proxy_bypass
-                    .store(false, std::sync::atomic::Ordering::Release);
-                if let Err(err) = self.ensure_headroom_running() {
-                    log::warn!(
-                        "apply_pricing_gate_status: ensure_headroom_running failed: {err:#}"
-                    );
-                }
-            }
-        }
-    }
 }
-
-/// Number of consecutive gated pricing polls required before flipping
-/// `proxy_bypass` on. With the React UI's 60s focused / 600s blurred poll
-/// cadence, 2 polls = 1–10 minutes minimum before a gated state takes effect.
-/// Tuned to ride out single-poll spikes (Anthropic returning a stale or
-/// momentary high utilization, transient network failures clearing auth
-/// state) without delaying real threshold crossings meaningfully.
-const PRICING_GATE_DEBOUNCE_POLLS: u32 = 2;
 
 pub(crate) fn current_platform() -> &'static str {
     std::env::consts::OS
@@ -5669,153 +5471,6 @@ mod tests {
             "fresh AppState must default to bypass=off so the intercept routes through the Python proxy"
         );
         fs::remove_dir_all(base_dir).expect("remove temp dir");
-    }
-
-    fn pricing_status_with_optimization(allowed: bool) -> crate::models::HeadroomPricingStatus {
-        use crate::models::{
-            ClaudeAccountProfile, ClaudeAuthMethod, ClaudePlanTier, HeadroomPricingStatus,
-        };
-        let now = chrono::Utc::now();
-        HeadroomPricingStatus {
-            authenticated: true,
-            local_grace_started_at: now,
-            local_grace_ends_at: now,
-            local_grace_active: false,
-            account_sync_error: None,
-            needs_authentication: false,
-            optimization_allowed: allowed,
-            should_nudge: false,
-            nudge_level: 0,
-            gate_reason: None,
-            gate_message: String::new(),
-            nudge_threshold_percent: None,
-            effective_nudge_thresholds_percent: None,
-            disable_threshold_percent: None,
-            effective_disable_threshold_percent: None,
-            recommended_subscription_tier: None,
-            claude: ClaudeAccountProfile {
-                auth_method: ClaudeAuthMethod::Unknown,
-                email: None,
-                display_name: None,
-                account_uuid: None,
-                organization_uuid: None,
-                billing_type: None,
-                account_created_at: None,
-                subscription_created_at: None,
-                has_extra_usage_enabled: false,
-                plan_tier: ClaudePlanTier::Unknown,
-                plan_detection_source: None,
-                organization_type: None,
-                rate_limit_tier: None,
-                weekly_utilization_pct: None,
-                five_hour_utilization_pct: None,
-                extra_usage_monthly_limit: None,
-                profile_fetch_error: None,
-            },
-            account: None,
-            launch_discount_active: false,
-        }
-    }
-
-    #[test]
-    fn apply_pricing_gate_status_flips_bypass_on_for_gated_status() {
-        let base_dir = temp_test_dir("headroom-bypass-on");
-        let state = AppState::new_in(base_dir.clone()).expect("app state");
-        assert!(!state
-            .proxy_bypass
-            .load(std::sync::atomic::Ordering::Acquire));
-
-        // Debounce: first gated reading just bumps the streak.
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
-        assert!(
-            !state
-                .proxy_bypass
-                .load(std::sync::atomic::Ordering::Acquire),
-            "first gated reading must not flip bypass yet"
-        );
-
-        // Second consecutive gated reading crosses the debounce threshold.
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
-        assert!(
-            state
-                .proxy_bypass
-                .load(std::sync::atomic::Ordering::Acquire),
-            "second consecutive gated reading must flip bypass=true"
-        );
-        fs::remove_dir_all(base_dir).ok();
-    }
-
-    #[test]
-    fn apply_pricing_gate_status_resets_streak_on_ungated_reading() {
-        let base_dir = temp_test_dir("headroom-bypass-debounce-reset");
-        let state = AppState::new_in(base_dir.clone()).expect("app state");
-
-        // One gated reading bumps the streak to 1.
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
-        assert!(!state
-            .proxy_bypass
-            .load(std::sync::atomic::Ordering::Acquire));
-
-        // Ungated reading resets the streak — a single-poll spike clears.
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(true));
-
-        // Now another gated reading is the first of a new window, not the
-        // second of the old one. Bypass must still be off.
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
-        assert!(
-            !state
-                .proxy_bypass
-                .load(std::sync::atomic::Ordering::Acquire),
-            "an intervening ungated reading must reset the debounce streak"
-        );
-        fs::remove_dir_all(base_dir).ok();
-    }
-
-    #[test]
-    fn apply_pricing_gate_status_clears_bypass_for_ungated_status() {
-        let base_dir = temp_test_dir("headroom-bypass-off");
-        let state = AppState::new_in(base_dir.clone()).expect("app state");
-        // Pre-set the flag, simulating that the gate fired earlier.
-        state
-            .proxy_bypass
-            .store(true, std::sync::atomic::Ordering::Release);
-
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(true));
-
-        assert!(
-            !state
-                .proxy_bypass
-                .load(std::sync::atomic::Ordering::Acquire),
-            "ungated status must clear bypass — this is the upgrade-recovery path"
-        );
-        fs::remove_dir_all(base_dir).ok();
-    }
-
-    #[test]
-    fn apply_pricing_gate_status_is_idempotent_when_state_already_matches() {
-        let base_dir = temp_test_dir("headroom-bypass-noop");
-        let state = AppState::new_in(base_dir.clone()).expect("app state");
-
-        // Already off + ungated status → still off (no transition triggered).
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(true));
-        assert!(!state
-            .proxy_bypass
-            .load(std::sync::atomic::Ordering::Acquire));
-
-        // Two consecutive gated readings cross the debounce threshold and flip.
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
-        assert!(state
-            .proxy_bypass
-            .load(std::sync::atomic::Ordering::Acquire));
-
-        // Already on + gated status → still on.
-        state.apply_pricing_gate_status(&pricing_status_with_optimization(false));
-        assert!(state
-            .proxy_bypass
-            .load(std::sync::atomic::Ordering::Acquire));
-
-        fs::remove_dir_all(base_dir).ok();
     }
 
     #[test]
